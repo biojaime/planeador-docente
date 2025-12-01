@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Temporary Files (App specific)
+temp_rubric_*
+*.tmp
+
+# Environment variables
+.env
