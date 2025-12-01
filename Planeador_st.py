@@ -386,43 +386,43 @@ with tab1:
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         st.subheader("Información Docente")
-        st.session_state.docente_titulo = st.selectbox("Título", ["Dr.", "Dra.", "Mtro.", "Mtra.", "Prof.", "Pasante."], index=["Dr.", "Dra.", "Mtro.", "Mtra.", "Prof.", "Pasante."].index(st.session_state.docente_titulo) if st.session_state.docente_titulo in ["Dr.", "Dra.", "Mtro.", "Mtra.", "Prof.", "Pasante."] else 0)
-        st.session_state.docente_nombre = st.text_input("Nombre Completo", st.session_state.docente_nombre)
+        st.selectbox("Título", ["Dr.", "Dra.", "Mtro.", "Mtra.", "Prof.", "Pasante."], key="docente_titulo")
+        st.text_input("Nombre Completo", key="docente_nombre")
     
     with col_d2:
         st.subheader("Información Curso")
         c1, c2 = st.columns(2)
         with c1:
-            st.session_state.curso_grado = st.selectbox("Grado", ["1ro", "2do", "3ro"], index=["1ro", "2do", "3ro"].index(st.session_state.curso_grado) if st.session_state.curso_grado in ["1ro", "2do", "3ro"] else 0)
+            st.selectbox("Grado", ["1ro", "2do", "3ro"], key="curso_grado")
         with c2:
-            st.session_state.curso_grupos = st.multiselect("Grupos", LISTA_GRUPOS, default=st.session_state.curso_grupos)
+            st.multiselect("Grupos", LISTA_GRUPOS, key="curso_grupos")
         
-        st.session_state.curso_materia = st.selectbox("Materia", LISTA_MATERIAS, index=LISTA_MATERIAS.index(st.session_state.curso_materia) if st.session_state.curso_materia in LISTA_MATERIAS else 0)
-        st.session_state.curso_campo = st.selectbox("Campo Formativo", LISTA_CAMPOS, index=LISTA_CAMPOS.index(st.session_state.curso_campo) if st.session_state.curso_campo in LISTA_CAMPOS else 0)
+        st.selectbox("Materia", LISTA_MATERIAS, key="curso_materia")
+        st.selectbox("Campo Formativo", LISTA_CAMPOS, key="curso_campo")
 
 with tab2:
     st.subheader("Detalles de la Planeación")
-    st.session_state.plan_metodologia = st.selectbox("Metodología", LISTA_METODOLOGIA, index=LISTA_METODOLOGIA.index(st.session_state.plan_metodologia) if st.session_state.plan_metodologia in LISTA_METODOLOGIA else 0)
+    st.selectbox("Metodología", LISTA_METODOLOGIA, key="plan_metodologia")
     
     col_t1, col_t2 = st.columns(2)
     with col_t1:
-        st.session_state.plan_fecha_inicio = st.date_input("Fecha Inicio", st.session_state.plan_fecha_inicio, format="DD/MM/YYYY")
+        st.date_input("Fecha Inicio", format="DD/MM/YYYY", key="plan_fecha_inicio")
     with col_t2:
-        st.session_state.plan_fecha_fin = st.date_input("Fecha Fin", st.session_state.plan_fecha_fin, format="DD/MM/YYYY")
+        st.date_input("Fecha Fin", format="DD/MM/YYYY", key="plan_fecha_fin")
     
-    st.session_state.plan_dias = st.multiselect("Días de Clase", LISTA_DIAS, default=st.session_state.plan_dias)
+    st.multiselect("Días de Clase", LISTA_DIAS, key="plan_dias")
     
     st.markdown("**Ejes Articuladores**")
     c_e1, c_e2, c_e3 = st.columns(3)
-    with c_e1: st.session_state.plan_eje1 = st.selectbox("Eje 1", LISTA_EJES, index=LISTA_EJES.index(st.session_state.plan_eje1) if st.session_state.plan_eje1 in LISTA_EJES else 0)
-    with c_e2: st.session_state.plan_eje2 = st.selectbox("Eje 2", LISTA_EJES, index=LISTA_EJES.index(st.session_state.plan_eje2) if st.session_state.plan_eje2 in LISTA_EJES else 0)
-    with c_e3: st.session_state.plan_eje3 = st.selectbox("Eje 3", LISTA_EJES, index=LISTA_EJES.index(st.session_state.plan_eje3) if st.session_state.plan_eje3 in LISTA_EJES else 0)
+    with c_e1: st.selectbox("Eje 1", LISTA_EJES, key="plan_eje1")
+    with c_e2: st.selectbox("Eje 2", LISTA_EJES, key="plan_eje2")
+    with c_e3: st.selectbox("Eje 3", LISTA_EJES, key="plan_eje3")
     
     st.markdown("**Materias Vinculadas**")
     c_m1, c_m2, c_m3 = st.columns(3)
-    with c_m1: st.session_state.plan_disc1 = st.selectbox("Materia 1", ["Seleccione materia"] + LISTA_MATERIAS, index=(["Seleccione materia"] + LISTA_MATERIAS).index(st.session_state.plan_disc1) if st.session_state.plan_disc1 in (["Seleccione materia"] + LISTA_MATERIAS) else 0)
-    with c_m2: st.session_state.plan_disc2 = st.selectbox("Materia 2", ["Seleccione materia"] + LISTA_MATERIAS, index=(["Seleccione materia"] + LISTA_MATERIAS).index(st.session_state.plan_disc2) if st.session_state.plan_disc2 in (["Seleccione materia"] + LISTA_MATERIAS) else 0)
-    with c_m3: st.session_state.plan_disc3 = st.selectbox("Materia 3", ["Seleccione materia"] + LISTA_MATERIAS, index=(["Seleccione materia"] + LISTA_MATERIAS).index(st.session_state.plan_disc3) if st.session_state.plan_disc3 in (["Seleccione materia"] + LISTA_MATERIAS) else 0)
+    with c_m1: st.selectbox("Materia 1", ["Seleccione materia"] + LISTA_MATERIAS, key="plan_disc1")
+    with c_m2: st.selectbox("Materia 2", ["Seleccione materia"] + LISTA_MATERIAS, key="plan_disc2")
+    with c_m3: st.selectbox("Materia 3", ["Seleccione materia"] + LISTA_MATERIAS, key="plan_disc3")
 
 with tab3:
     st.subheader("Contenido Pedagógico")
