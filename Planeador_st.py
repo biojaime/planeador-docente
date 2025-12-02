@@ -553,14 +553,16 @@ if st.button("✨ Generar Prompt IA"):
     
     prompt += f"- **Problemática Contextual:** {clean_html(p_data['problematica']) or 'No definida. Propón una relevante.'}\n"
     prompt += f"- **PDA:** {clean_html(p_data['pda']) or 'Propón el PDA oficial más adecuado.'}\n"
-    prompt += f"- **Objetivos:** {clean_html(p_data['objetivos']) or 'Redacta objetivos claros.'}\n"
-    prompt += f"- **Perfil de Egreso:** {clean_html(p_data['perfiles']) or 'Indica rasgos favorecidos.'}\n"
+    prompt += f"- **Objetivos:** {clean_html(p_data['objetivos']) or 'Propón objetivos de aprendizaje adecuados.'}\n"
+    prompt += f"- **Perfil de Egreso:** {clean_html(p_data['perfiles']) or 'Propón los rasgos del perfil de egreso que se favorecen.'}\n"
     prompt += f"- **Producto Final:** {clean_html(p_data['producto']) or 'Propón un producto creativo.'}\n"
     
     if "Proyectos" in p_data['metodologia']:
         prompt += "\nDesarrolla la secuencia didáctica siguiendo las fases de **ABPj** (Presentación, Recolección, Formulación, Organización, Vivamos la experiencia, Resultados)."
     else:
         prompt += "\nDesarrolla la secuencia didáctica como una **Planeación Diaria** (Inicio, Desarrollo, Cierre) para cada día."
+
+    prompt += "\nEn la secuencia didáctica, incluye para cada actividad/fase los **Materiales y Recursos** necesarios, así como una propuesta de **Evaluación** (sugiere Lista de Cotejo o Rúbrica si es necesario)."
 
     st.code(prompt, language="text")
     st.info("Copia el texto de arriba y pégalo en tu IA favorita (ChatGPT, Gemini, DeepSeek).")
