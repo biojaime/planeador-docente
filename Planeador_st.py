@@ -104,6 +104,108 @@ def parse_date(date_str):
         except ValueError:
             return date.today()
 
+# --- Load PDA Database ---
+@st.cache_data
+def load_pda_database():
+    import csv
+    csv_path = _get_full_path("PProceso de Desarrollo de Aprendizaje (PDA).csv")
+    if not os.path.exists(csv_path):
+        return []
+    records = []
+    try:
+        with open(csv_path, mode="r", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            col_map = {col.strip(): idx for idx, col in enumerate(header)}
+            
+            idx_campo = col_map.get("Campo Formativo", 0)
+            idx_materia = col_map.get("Materia", 1)
+            idx_grado = col_map.get("Grado", 2)
+            idx_contenido = col_map.get("Contenido", 3)
+            idx_pda = col_map.get("Proceso de Desarrollo de Aprendizaje (PDA)", 4)
+            
+            for row in reader:
+                if len(row) > max(idx_campo, idx_materia, idx_grado, idx_contenido, idx_pda):
+                    records.append({
+                        "campo": row[idx_campo].strip(),
+                        "materia": row[idx_materia].strip(),
+                        "grado": row[idx_grado].strip(),
+                        "contenido": row[idx_contenido].strip(),
+                        "pda": row[idx_pda].strip()
+                    })
+    except Exception as e:
+        st.error(f"Error al cargar la base de datos de PDA: {e}")
+    return records
+
+def map_subject_and_grade(materia, curso_grado):
+    grado_map = {"1ro": "1\u00ba", "2do": "2\u00ba", "3ro": "3\u00ba"}
+    target_grado = grado_map.get(curso_grado, "1\u00ba")
+    
+    materia_clean = materia.strip()
+    
+    if materia_clean.endswith(" III"):
+        base_subject = materia_clean[:-4].strip()
+        target_grado = "3\u00ba"
+    elif materia_clean.endswith(" II"):
+        base_subject = materia_clean[:-3].strip()
+        target_grado = "2\u00ba"
+    elif materia_clean.endswith(" I"):
+        base_subject = materia_clean[:-2].strip()
+        target_grado = "1\u00ba"
+    else:
+        base_subject = materia_clean
+        
+    materia_translation = {
+        "Matematicas": "Matem\u00e1ticas",
+        "Español": "Espa\u00f1ol",
+        "Educación Civica y Etica": "Formaci\u00f3n C\u00edvica y \u00c9tica",
+        "Ingles": "Ingl\u00e9s",
+        "Informatica": "Tecnolog\u00eda",
+        "Historia": "Historia",
+        "Educación Fisica": "Educaci\u00f3n F\u00edsica",
+        "Biología": "Biolog\u00eda",
+        "Fisica": "F\u00edsica",
+        "Quimica": "Qu\u00edmica",
+    }
+    
+    if base_subject == "Ciencias":
+        if target_grado == "1\u00ba":
+            return "Biolog\u00eda", "1\u00ba"
+        elif target_grado == "2\u00ba":
+            return "F\u00edsica", "2\u00ba"
+        elif target_grado == "3\u00ba":
+            return "Qu\u00edmica", "3\u00ba"
+            
+    if base_subject == "Biología":
+        return "Biolog\u00eda", "1\u00ba"
+    if base_subject == "Fisica":
+        return "F\u00edsica", "2\u00ba"
+    if base_subject == "Quimica":
+        return "Qu\u00edmica", "3\u00ba"
+        
+    csv_subject = materia_translation.get(base_subject, base_subject)
+    return csv_subject, target_grado
+
+def get_pdas_for_selection(materia, curso_grado):
+    records = load_pda_database()
+    csv_subject, target_grado = map_subject_and_grade(materia, curso_grado)
+    
+    filtered = []
+    for r in records:
+        def normalize(text):
+            import unicodedata
+            return "".join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower().strip()
+            
+        if normalize(r["materia"]) == normalize(csv_subject) and normalize(r["grado"]) == normalize(target_grado):
+            filtered.append(r)
+    return filtered
+
+def get_current_pda():
+    if st.session_state.get("pda_custom_active", False):
+        return st.session_state.get("pda_custom", "")
+    else:
+        return st.session_state.get("pda_selected", "")
+
 # --- Initialization & State ---
 
 def init_session_state():
@@ -126,6 +228,9 @@ def init_session_state():
         "plan_disc3": "Seleccione materia",
         "text_problematica": "",
         "text_pda": "",
+        "pda_custom_active": False,
+        "pda_selected": "",
+        "pda_custom": "",
         "text_objetivos": "",
         "text_perfiles": "",
         "text_producto": "",
@@ -263,6 +368,12 @@ with st.sidebar:
                 
                 st.session_state.text_problematica = plan.get("problematica", "")
                 st.session_state.text_pda = plan.get("pda", "")
+                st.session_state.pda_custom_active = plan.get("pda_custom_active", False)
+                st.session_state.pda_selected = plan.get("pda_selected", "")
+                st.session_state.pda_custom = plan.get("pda_custom", "")
+                if "pda_custom_active" not in plan and "pda" in plan:
+                    st.session_state.pda_custom_active = True
+                    st.session_state.pda_custom = plan.get("pda", "")
                 st.session_state.text_objetivos = plan.get("objetivos", "")
                 st.session_state.text_perfiles = plan.get("perfiles", "")
                 st.session_state.text_producto = plan.get("producto", "")
@@ -328,7 +439,10 @@ with st.sidebar:
                 "fecha_fin": st.session_state.plan_fecha_fin.isoformat(),
                 "dias_planeados": st.session_state.plan_dias,
                 "problematica": st.session_state.text_problematica,
-                "pda": st.session_state.text_pda,
+                "pda": get_current_pda(),
+                "pda_custom_active": st.session_state.get("pda_custom_active", False),
+                "pda_selected": st.session_state.get("pda_selected", ""),
+                "pda_custom": st.session_state.get("pda_custom", ""),
                 "objetivos": st.session_state.text_objetivos,
                 "perfiles": st.session_state.text_perfiles,
                 "producto": st.session_state.text_producto,
@@ -436,7 +550,41 @@ with tab3:
     ks = st.session_state.quill_key_suffix
     
     st.session_state.text_problematica = st_quill(value=st.session_state.text_problematica, placeholder="Problemática Contextual", toolbar=toolbar, key=f"quill_prob_{ks}")
-    st.session_state.text_pda = st_quill(value=st.session_state.text_pda, placeholder="PDA", toolbar=toolbar, key=f"quill_pda_{ks}")
+    st.markdown("**Proceso de Desarrollo de Aprendizaje (PDA)**")
+    st.checkbox(
+        "No hay un PDA que se adapte a mi clase (Redactar uno personalizado como codiseño)",
+        key="pda_custom_active"
+    )
+    
+    if st.session_state.pda_custom_active:
+        st.session_state.pda_custom = st_quill(
+            value=st.session_state.pda_custom,
+            placeholder="Redacte su PDA personalizado (Codiseño)...",
+            toolbar=toolbar,
+            key=f"quill_pda_custom_{ks}"
+        )
+    else:
+        pdas_list = get_pdas_for_selection(st.session_state.curso_materia, st.session_state.curso_grado)
+        if not pdas_list:
+            st.info("No se encontraron PDAs oficiales para esta materia y grado en el Plan Sintético. Puede redactar uno personalizado seleccionando la casilla de arriba.")
+            st.session_state.pda_selected = ""
+        else:
+            options = [p["pda"] for p in pdas_list]
+            
+            default_index = 0
+            if st.session_state.pda_selected in options:
+                default_index = options.index(st.session_state.pda_selected)
+                
+            st.selectbox(
+                "Seleccione el PDA oficial (Plan Sintético):",
+                options=options,
+                index=default_index,
+                key="pda_selected"
+            )
+            
+            selected_record = pdas_list[options.index(st.session_state.pda_selected)] if st.session_state.pda_selected in options else None
+            if selected_record:
+                st.caption(f"**Contenido del Plan Sintético asociado:** {selected_record['contenido']}")
     st.session_state.text_objetivos = st_quill(value=st.session_state.text_objetivos, placeholder="Objetivos", toolbar=toolbar, key=f"quill_obj_{ks}")
     st.session_state.text_perfiles = st_quill(value=st.session_state.text_perfiles, placeholder="Perfiles de Egreso", toolbar=toolbar, key=f"quill_perf_{ks}")
     st.session_state.text_producto = st_quill(value=st.session_state.text_producto, placeholder="Producto Final", toolbar=toolbar, key=f"quill_prod_{ks}")
@@ -552,7 +700,11 @@ if st.button("✨ Generar Prompt IA"):
     if disc: prompt += f"- **Materias vinculadas:** {disc}.\n"
     
     prompt += f"- **Problemática Contextual:** {clean_html(p_data['problematica']) or 'No definida. Propón una relevante.'}\n"
-    prompt += f"- **PDA:** {clean_html(p_data['pda']) or 'Propón el PDA oficial más adecuado.'}\n"
+    if p_data.get('pda_custom_active', False):
+        prompt += f"- **PDA redactado como codiseño:** {clean_html(p_data.get('pda_custom', '')) or 'No definido.'}\n"
+        prompt += f"- **Instrucción Especial:** Redacta un PDA que se ajuste a la SEP fase 6.\n"
+    else:
+        prompt += f"- **PDA (Plan Sintético):** {clean_html(p_data.get('pda_selected', '')) or 'Propón el PDA oficial más adecuado.'}\n"
     prompt += f"- **Objetivos:** {clean_html(p_data['objetivos']) or 'Propón objetivos de aprendizaje adecuados.'}\n"
     prompt += f"- **Perfil de Egreso:** {clean_html(p_data['perfiles']) or 'Propón los rasgos del perfil de egreso que se favorecen.'}\n"
     prompt += f"- **Producto Final:** {clean_html(p_data['producto']) or 'Propón un producto creativo.'}\n"
@@ -624,11 +776,13 @@ def generate_pdf_bytes():
     t1 = Table(row1, colWidths=[0.8*inch, 1.2*inch, 0.8*inch, 1.2*inch, 0.8*inch, 0.8*inch, 1.4*inch, 3*inch])
     t1.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
 
+    pda_label = "PDA redactado como codiseño:" if p.get("pda_custom_active", False) else "Plan Sintético:"
+
     main_data = [
         [t0], [t1],
         [PB("Materia:"), P(d['curso']['materia'])], [PB("Metodología:"), P(p['metodologia'])],
         [PB("Ejes:"), P(ejes)], [PB("Vinculación:"), P(disc)],
-        [PB("Problemática:"), P(p['problematica'])], [PB("PDA:"), P(p['pda'])],
+        [PB("Problemática:"), P(p['problematica'])], [PB(pda_label), P(p['pda'])],
         [PB("Objetivos:"), P(p['objetivos'])], [PB("Perfiles:"), P(p['perfiles'])],
         [PB("Temporalidad:"), P(temp_str)], [PB("Producto:"), P(p['producto'])]
     ]
@@ -682,7 +836,27 @@ def generate_pdf_bytes():
     elements.append(Paragraph("_____________________________________________", ParagraphStyle(name='Firma', alignment=TA_CENTER)))
     elements.append(Paragraph("Vo. Bo. Director David Pérez Ordoñez", ParagraphStyle(name='Firma', alignment=TA_CENTER)))
 
-    doc.build(elements)
+    campo = d['curso']['campo']
+    bg_image_name = None
+    if campo == "Lenguajes":
+        bg_image_name = "Lenguajes Hoja.png"
+    elif campo == "Saberes y Pensamiento Científico":
+        bg_image_name = "Pensamiento Cientifico hoja.png"
+    elif campo == "Ética, Naturaleza y Sociedades":
+        bg_image_name = "Etica hoja.png"
+    elif campo == "De lo Humano y lo Comunitario":
+        bg_image_name = "Comunitario hoja.png"
+
+    def draw_background(canvas, doc):
+        canvas.saveState()
+        if bg_image_name:
+            bg_path = _get_full_path(bg_image_name)
+            if os.path.exists(bg_path):
+                # Landscape letter size is 792 x 612
+                canvas.drawImage(bg_path, 0, 0, width=792, height=612)
+        canvas.restoreState()
+
+    doc.build(elements, onFirstPage=draw_background, onLaterPages=draw_background)
     buffer.seek(0)
     return buffer
 
