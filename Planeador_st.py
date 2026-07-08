@@ -7,6 +7,8 @@ from datetime import timedelta, date, datetime
 import io
 import base64
 from streamlit_quill import st_quill
+from PIL import Image
+import hashlib
 
 # --- ReportLab Imports ---
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak
@@ -86,11 +88,42 @@ def html_to_reportlab(html_text):
 def _embed_image_to_pdf(path, content_list, page_width):
     if path and os.path.exists(path):
         try:
-            img = RLImage(path, width=page_width, height=4*inch, kind='proportional')
+            flat_path = flatten_image(path)
+            img = RLImage(flat_path, width=page_width, height=4*inch, kind='proportional')
             content_list.append(img)
             content_list.append(Spacer(1, 0.1 * inch))
         except Exception as e:
             content_list.append(Paragraph(f"<i>[Error al cargar imagen: {os.path.basename(path)}]</i>", getSampleStyleSheet()['Italic']))
+
+
+def flatten_image(src_path, force_recreate=False):
+    """If image has alpha/transparency, flatten it on white background and return a path to a non-alpha image.
+    Caches the flattened image next to the original with suffix `_flat.jpg` to avoid repeating work.
+    """
+    try:
+        dirname = os.path.dirname(src_path)
+        base = os.path.splitext(os.path.basename(src_path))[0]
+        out_name = os.path.join(dirname, f"{base}_flat.jpg")
+
+        if os.path.exists(out_name) and not force_recreate:
+            # quick check: if original is newer than flattened, recreate
+            if os.path.getmtime(out_name) >= os.path.getmtime(src_path):
+                return out_name
+
+        with Image.open(src_path) as im:
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                if im.mode != "RGBA":
+                    im = im.convert("RGBA")
+                bg.paste(im, mask=im.split()[3])
+                bg.save(out_name, "JPEG", quality=95)
+                return out_name
+            else:
+                # No alpha, convert to JPEG to ensure consistent rendering
+                im.convert("RGB").save(out_name, "JPEG", quality=95)
+                return out_name
+    except Exception:
+        return src_path
 
 def parse_date(date_str):
     """Parses a date string trying ISO format first, then DD/MM/YYYY."""
@@ -254,6 +287,36 @@ def init_session_state():
 
 init_session_state()
 
+
+def _compute_data_hash(data_obj):
+    try:
+        j = json.dumps(data_obj, sort_keys=True, ensure_ascii=False).encode('utf-8')
+        return hashlib.sha256(j).hexdigest()
+    except Exception:
+        return None
+
+
+def autosave_current_data():
+    """Save the current planning data to a local autosave JSON when it changes."""
+    try:
+        if not st.session_state.get("autosave_enabled", True):
+            return
+
+        data = get_current_data()
+        h = _compute_data_hash(data)
+        if not h:
+            return
+
+        if st.session_state.get("_autosave_hash") != h:
+            out_path = os.path.abspath("planeacion_autosave.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            st.session_state["_autosave_hash"] = h
+            # Give a subtle indication (non-blocking)
+            st.experimental_set_query_params(_autosave=int(datetime.now().timestamp()))
+    except Exception:
+        pass
+
 # --- Lists ---
 LISTA_MATERIAS = ["Matematicas", "Matematicas I", "Matematicas II", "Matematicas III", "Español", "Español I", "Español II", "Español III", "Educación Civica y Etica", "Educación Civica y Etica I", "Educación Civica y Etica II", "Educación Civica y Etica III", "Ingles", "Ingles I", "Ingles II", "Ingles III", "Informatica", "Informatica I", "Informatica II", "Informatica III", "Historia", "Historia I", "Historia II", "Historia III", "Educación Fisica", "Artes", "Ciencias", "Biología", "Fisica", "Quimica"]
 LISTA_METODOLOGIA = ["Seleccione metodología", "Aprendizaje Basado en Proyectos (ABPj)", "Aprendizaje Basado en Problemas (ABP)", "STEAM", "Clase invertida (Flipped Classroom)", "Aprendizaje Servicio (ApS)", "Gamificación", "Aprendizaje autodirigido", "Aprendizaje situado", "Aprendizaje entre pares"]
@@ -332,6 +395,7 @@ st.markdown(f"""
 # --- Sidebar Actions ---
 with st.sidebar:
     st.header("Acciones")
+    st.checkbox("Autoguardar localmente", value=True, key="autosave_enabled")
     
     uploaded_file = st.file_uploader("Cargar Planeación (JSON)", type="json")
     
@@ -397,6 +461,75 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"Error al cargar: {e}")
+
+    # Attempt automatic restore from local autosave if available and not already loaded
+    def restore_autosave():
+        try:
+            if st.session_state.get("_autosave_loaded"):
+                return
+            if not st.session_state.get("autosave_enabled", True):
+                return
+            autosave_path = os.path.abspath("planeacion_autosave.json")
+            if not os.path.exists(autosave_path):
+                return
+            with open(autosave_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            docente = data.get("docente", {})
+            st.session_state.docente_titulo = docente.get("titulo", st.session_state.docente_titulo)
+            st.session_state.docente_nombre = docente.get("nombre", st.session_state.docente_nombre)
+
+            curso = data.get("curso", {})
+            st.session_state.curso_grado = curso.get("grado", st.session_state.curso_grado)
+            st.session_state.curso_grupos = curso.get("grupos", st.session_state.curso_grupos)
+            st.session_state.curso_materia = curso.get("materia", st.session_state.curso_materia)
+            st.session_state.curso_campo = curso.get("campo", st.session_state.curso_campo)
+
+            plan = data.get("planeacion", {})
+            st.session_state.plan_metodologia = plan.get("metodologia", st.session_state.plan_metodologia)
+            st.session_state.plan_fecha_inicio = parse_date(plan.get("fecha_inicio"))
+            st.session_state.plan_fecha_fin = parse_date(plan.get("fecha_fin"))
+            st.session_state.plan_dias = plan.get("dias_planeados", st.session_state.plan_dias)
+            st.session_state.plan_eje1 = plan.get("eje1", st.session_state.plan_eje1)
+            st.session_state.plan_eje2 = plan.get("eje2", st.session_state.plan_eje2)
+            st.session_state.plan_eje3 = plan.get("eje3", st.session_state.plan_eje3)
+            st.session_state.plan_disc1 = plan.get("disciplina1", st.session_state.plan_disc1)
+            st.session_state.plan_disc2 = plan.get("disciplina2", st.session_state.plan_disc2)
+            st.session_state.plan_disc3 = plan.get("disciplina3", st.session_state.plan_disc3)
+
+            st.session_state.text_problematica = plan.get("problematica", st.session_state.text_problematica)
+            st.session_state.text_pda = plan.get("pda", st.session_state.text_pda)
+            st.session_state.pda_custom_active = plan.get("pda_custom_active", st.session_state.pda_custom_active)
+            st.session_state.pda_selected = plan.get("pda_selected", st.session_state.pda_selected)
+            st.session_state.pda_custom = plan.get("pda_custom", st.session_state.pda_custom)
+            st.session_state.text_objetivos = plan.get("objetivos", st.session_state.text_objetivos)
+            st.session_state.text_perfiles = plan.get("perfiles", st.session_state.text_perfiles)
+            st.session_state.text_producto = plan.get("producto", st.session_state.text_producto)
+
+            abpj = plan.get("secuencia_abpj", {})
+            st.session_state.abpj_presentacion = abpj.get("presentacion", st.session_state.abpj_presentacion)
+            st.session_state.abpj_recoleccion = abpj.get("recoleccion", st.session_state.abpj_recoleccion)
+            st.session_state.abpj_formulacion = abpj.get("formulacion", st.session_state.abpj_formulacion)
+            st.session_state.abpj_organizacion = abpj.get("organizacion", st.session_state.abpj_organizacion)
+            st.session_state.abpj_experiencia = abpj.get("experiencia", st.session_state.abpj_experiencia)
+            st.session_state.abpj_resultados = abpj.get("resultados", st.session_state.abpj_resultados)
+            st.session_state.abpj_materiales = abpj.get("materiales", st.session_state.abpj_materiales)
+            st.session_state.abpj_evaluacion = abpj.get("evaluacion", st.session_state.abpj_evaluacion)
+            st.session_state.abpj_rubrica_path = abpj.get("rubrica_path", st.session_state.abpj_rubrica_path)
+
+            daily_list = plan.get("secuencia_diaria", [])
+            if isinstance(daily_list, list):
+                st.session_state.daily_plan_data = {item["dia_nombre"]: item for item in daily_list if "dia_nombre" in item}
+
+            st.session_state.last_loaded_file_id = "autosave"
+            st.session_state.quill_key_suffix += 1
+            st.session_state["_autosave_loaded"] = True
+            st.info("Autosave restaurado automáticamente.")
+        except Exception as e:
+            # Non-fatal; show a subtle warning
+            st.warning(f"No se pudo restaurar autosave: {e}")
+
+    restore_autosave()
 
     def get_current_data():
         daily_sequence = []
@@ -675,6 +808,7 @@ with tab4:
 
 # --- AI Prompt Generation ---
 st.markdown("---")
+autosave_current_data()
 if st.button("✨ Generar Prompt IA"):
     d = get_current_data()
     p_data = d['planeacion']
@@ -852,8 +986,12 @@ def generate_pdf_bytes():
         if bg_image_name:
             bg_path = _get_full_path(bg_image_name)
             if os.path.exists(bg_path):
-                # Landscape letter size is 792 x 612
-                canvas.drawImage(bg_path, 0, 0, width=792, height=612)
+                try:
+                    flat = flatten_image(bg_path)
+                    width, height = doc.pagesize
+                    canvas.drawImage(flat, 0, 0, width=width, height=height)
+                except Exception:
+                    canvas.drawImage(bg_path, 0, 0)
         canvas.restoreState()
 
     doc.build(elements, onFirstPage=draw_background, onLaterPages=draw_background)
