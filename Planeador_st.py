@@ -879,7 +879,17 @@ def generate_pdf_bytes():
     col_widths_header = [2*inch, page_width - 4*inch, 2*inch]
     header_data = [[logo_imm_rl, header_paragraphs, logo_sep_rl]]
     header_table = Table(header_data, colWidths=col_widths_header)
-    header_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('ALIGN', (0, 0), (0, 0), 'LEFT'), ('ALIGN', (1, 0), (1, 0), 'CENTER'), ('ALIGN', (2, 0), (2, 0), 'RIGHT')]))
+    header_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+        ('ALIGN', (1, 0), (1, 0), 'CENTER'),
+        ('ALIGN', (2, 0), (2, 0), 'RIGHT'),
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6)
+    ]))
     elements.append(header_table)
     elements.append(Spacer(1, 0.2 * inch))
 
@@ -904,19 +914,40 @@ def generate_pdf_bytes():
 
     row0 = [[PB("Escuela:"), P("Instituto Mexicano Madero"), PB("CCT:"), P("21PES0013L"), PB("Docente:"), P(docente_name)]]
     t0 = Table(row0, colWidths=[0.8*inch, 2.7*inch, 0.5*inch, 1*inch, 0.8*inch, 4.2*inch])
-    t0.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
+    t0.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        ('LEFTPADDING', (0,0), (-1,-1), 4),
+        ('RIGHTPADDING', (0,0), (-1,-1), 4)
+    ]))
     
     row1 = [[PB("Grado:"), P(d['curso']['grado']), PB("Grupo:"), P(grupos_str), PB("Fase:"), P("6"), PB("Campo:"), P(d['curso']['campo'])]]
     t1 = Table(row1, colWidths=[0.8*inch, 1.2*inch, 0.8*inch, 1.2*inch, 0.8*inch, 0.8*inch, 1.4*inch, 3*inch])
-    t1.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
+    t1.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        ('LEFTPADDING', (0,0), (-1,-1), 4),
+        ('RIGHTPADDING', (0,0), (-1,-1), 4)
+    ]))
 
-    pda_label = "PDA redactado como codiseño:" if p.get("pda_custom_active", False) else "Plan Sintético:"
+    # PDA label and optional legend: use the formal name for printouts
+    if p.get("pda_custom_active", False):
+        pda_label = "PDA redactado como codiseño:"
+        pda_legend = None
+    else:
+        pda_label = "Proceso de Desarrollo de Aprendizaje (PDA):"
+        pda_legend = "Plan Sintético (oficial)" if p.get("pda_selected", "") else None
+
+    # Build main data rows; for PDA cell allow legend under the main paragraph
+    pda_cell = P(p['pda'])
+    if pda_legend:
+        pda_cell = [pda_cell, Paragraph(f"<i>{pda_legend}</i>", ParagraphStyle(name='SmallItalic', parent=styles['Normal'], fontSize=8))]
 
     main_data = [
         [t0], [t1],
         [PB("Materia:"), P(d['curso']['materia'])], [PB("Metodología:"), P(p['metodologia'])],
         [PB("Ejes:"), P(ejes)], [PB("Vinculación:"), P(disc)],
-        [PB("Problemática:"), P(p['problematica'])], [PB(pda_label), P(p['pda'])],
+        [PB("Problemática:"), P(p['problematica'])], [PB(pda_label), pda_cell],
         [PB("Objetivos:"), P(p['objetivos'])], [PB("Perfiles:"), P(p['perfiles'])],
         [PB("Temporalidad:"), P(temp_str)], [PB("Producto:"), P(p['producto'])]
     ]
@@ -924,7 +955,12 @@ def generate_pdf_bytes():
     main_table.setStyle(TableStyle([
         ('GRID', (0,0), (-1,-1), 1, colors.black),
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('SPAN', (0, 0), (1, 0)), ('SPAN', (0, 1), (1, 1))
+        ('SPAN', (0, 0), (1, 0)), ('SPAN', (0, 1), (1, 1)),
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4)
     ]))
     elements.append(main_table)
 
@@ -942,7 +978,13 @@ def generate_pdf_bytes():
             seq_data.append([PB(label), content])
         
         st_table = Table(seq_data, colWidths=[2.0*inch, page_width - 2.0*inch])
-        st_table.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 1, colors.black), ('VALIGN', (0,0), (-1,-1), 'TOP')]))
+        st_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 1, colors.black),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('BACKGROUND', (0,0), (-1,-1), colors.white),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6)
+        ]))
         elements.append(st_table)
     
     elif p['metodologia'] != "Seleccione metodología":
@@ -962,13 +1004,28 @@ def generate_pdf_bytes():
                 [PB("Evaluación"), eval_content]
             ]
             dt = Table(d_data, colWidths=[2.0*inch, page_width - 2.0*inch])
-            dt.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 1, colors.black), ('VALIGN', (0,0), (-1,-1), 'TOP')]))
+            dt.setStyle(TableStyle([
+                ('GRID', (0,0), (-1,-1), 1, colors.black),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('BACKGROUND', (0,0), (-1,-1), colors.white),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+                ('RIGHTPADDING', (0,0), (-1,-1), 6)
+            ]))
             elements.append(dt)
             elements.append(Spacer(1, 0.1*inch))
 
     elements.append(Spacer(1, 1.5*inch))
-    elements.append(Paragraph("_____________________________________________", ParagraphStyle(name='Firma', alignment=TA_CENTER)))
-    elements.append(Paragraph("Vo. Bo. Director David Pérez Ordoñez", ParagraphStyle(name='Firma', alignment=TA_CENTER)))
+    sig_style = ParagraphStyle(name='Firma', alignment=TA_CENTER)
+    sig_table = Table([[Paragraph("_____________________________________________", sig_style)], [Paragraph("Vo. Bo. Director David Pérez Ordoñez", sig_style)]], colWidths=[page_width])
+    sig_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6)
+    ]))
+    elements.append(sig_table)
 
     campo = d['curso']['campo']
     bg_image_name = None
