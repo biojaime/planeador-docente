@@ -1119,18 +1119,9 @@ def generate_pdf_bytes():
         elements.append(Paragraph("Secuencia Didáctica (ABPj)", ParagraphStyle(name='H2', fontSize=12, fontName='Helvetica-Bold', alignment=TA_CENTER)))
         abpj = p['secuencia_abpj']
         seq_data = []
-        campos = [("Presentación", "presentacion"), ("Recolección", "recoleccion"), ("Formulación", "formulacion"), ("Organización", "organizacion"), ("Vivamos", "experiencia"), ("Resultados", "resultados"), ("Materiales", "materiales"), ("Evaluación", "evaluacion")]
-        
+        campos = [("Presentación", "presentacion"), ("Recolección", "recoleccion"), ("Formulación", "formulacion"), ("Organización", "organizacion"), ("Vivamos", "experiencia"), ("Resultados", "resultados"), ("Materiales", "materiales")]
         for label, key in campos:
-            content_html = abpj.get(key, "")
-            # use flowables list
-            flowables = html_to_flowables(content_html, styles)
-            if key == "evaluacion":
-                # embed multiple images
-                for img_path in abpj.get("rubrica_paths", []):
-                    _embed_image_to_pdf(img_path, flowables, page_width - 2.0*inch)
-            seq_data.append([PB(label), flowables])
-        
+            seq_data.append([PB(label), Paragraph(html_to_reportlab(abpj.get(key, "")), styles['Normal'])])
         st_table = Table(seq_data, colWidths=[2.0*inch, page_width - 2.0*inch])
         st_table.setStyle(TableStyle([
             ('GRID', (0,0), (-1,-1), 1, colors.black),
@@ -1140,23 +1131,24 @@ def generate_pdf_bytes():
             ('RIGHTPADDING', (0,0), (-1,-1), 6)
         ]))
         elements.append(st_table)
-    
+        elements.append(Spacer(1, 0.1*inch))
+        elements.append(PB("Evaluación"))
+        eval_flow = html_to_flowables(abpj.get("evaluacion", ""), styles)
+        for img_path in abpj.get("rubrica_paths", []):
+            _embed_image_to_pdf(img_path, eval_flow, page_width - 2.0*inch)
+        for f in eval_flow:
+            elements.append(f)
     elif p['metodologia'] != "Seleccione metodología":
         elements.append(PageBreak())
         elements.append(Paragraph("Secuencia Didáctica (Diaria)", ParagraphStyle(name='H2', fontSize=12, fontName='Helvetica-Bold', alignment=TA_CENTER)))
         daily = p['secuencia_diaria']
         for i, day in enumerate(daily):
             elements.append(Paragraph(f"<b>{day['dia_nombre']}</b>", styles['Normal']))
-            eval_flow = html_to_flowables(day.get("evaluacion", ""), styles)
-            for img_path in day.get("rubrica_paths", []):
-                _embed_image_to_pdf(img_path, eval_flow, page_width - 2.0*inch)
-            
-                d_data = [
+            d_data = [
                 [PB("Inicio"), Paragraph(html_to_reportlab(day.get("inicio", "")), styles['Normal'])],
                 [PB("Desarrollo"), Paragraph(html_to_reportlab(day.get("desarrollo", "")), styles['Normal'])],
                 [PB("Cierre"), Paragraph(html_to_reportlab(day.get("cierre", "")), styles['Normal'])],
-                [PB("Materiales"), Paragraph(html_to_reportlab(day.get("materiales", "")), styles['Normal'])],
-                [PB("Evaluación"), eval_flow]
+                [PB("Materiales"), Paragraph(html_to_reportlab(day.get("materiales", "")), styles['Normal'])]
             ]
             dt = Table(d_data, colWidths=[2.0*inch, page_width - 2.0*inch])
             dt.setStyle(TableStyle([
@@ -1167,6 +1159,13 @@ def generate_pdf_bytes():
                 ('RIGHTPADDING', (0,0), (-1,-1), 6)
             ]))
             elements.append(dt)
+            elements.append(Spacer(1, 0.1*inch))
+            elements.append(PB("Evaluación"))
+            eval_flow = html_to_flowables(day.get("evaluacion", ""), styles)
+            for img_path in day.get("rubrica_paths", []):
+                _embed_image_to_pdf(img_path, eval_flow, page_width - 2.0*inch)
+            for f in eval_flow:
+                elements.append(f)
             elements.append(Spacer(1, 0.1*inch))
 
     elements.append(Spacer(1, 1.5*inch))
@@ -1224,29 +1223,58 @@ def generate_docx_bytes():
 
     p = d['planeacion']
     doc.add_heading('Contenido Pedagógico', level=2)
-    # PDAs
+    doc.add_paragraph(f"Metodología: {p.get('metodologia','')}")
+    doc.add_paragraph(f"Temporalidad: {date.fromisoformat(p.get('fecha_inicio','')).strftime('%d/%m/%Y')} - {date.fromisoformat(p.get('fecha_fin','')).strftime('%d/%m/%Y')}")
+    doc.add_paragraph(f"Días de clase: {', '.join(p.get('dias_planeados', []))}")
+    doc.add_paragraph(f"Ejes articuladores: {', '.join([e for e in [p.get('eje1'), p.get('eje2'), p.get('eje3')] if e and 'Seleccione' not in e])}")
+    doc.add_paragraph(f"Materias vinculadas: {', '.join([x for x in [p.get('disciplina1'), p.get('disciplina2'), p.get('disciplina3')] if x and 'Seleccione' not in x])}")
+    doc.add_paragraph('Problemática Contextual:')
+    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('problematica','')))
+    doc.add_paragraph('Objetivos:')
+    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('objetivos','')))
+    doc.add_paragraph('Perfil de Egreso:')
+    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('perfiles','')))
+    doc.add_paragraph('Producto Final:')
+    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('producto','')))
+
     pdas = d['planeacion'].get('pda_entries') or []
     if pdas:
         doc.add_heading('PDA(s)', level=3)
         for idx, pd in enumerate(pdas):
             doc.add_paragraph(re.sub(r'<[^>]+>', '', pd), style='List Bullet')
 
-    # Secuencia diaria
-    doc.add_heading('Secuencia Didáctica', level=2)
-    for day in d['planeacion'].get('secuencia_diaria', []):
-        doc.add_heading(day.get('dia_nombre', ''), level=3)
-        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('inicio','')))
-        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('desarrollo','')))
-        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('cierre','')))
-        doc.add_paragraph('Materiales:')
-        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('materiales','')))
-        doc.add_paragraph('Evaluación:')
-        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('evaluacion','')))
-        for img_path in day.get('rubrica_paths', []):
-            try:
-                doc.add_picture(img_path, width=Inches(4))
-            except Exception:
-                doc.add_paragraph(f"[Imagen: {os.path.basename(img_path)}]")
+    if 'ABPj' in p.get('metodologia',''):
+        doc.add_heading('Secuencia Didáctica ABPj', level=2)
+        abpj = p.get('secuencia_abpj', {})
+        for label in ['presentacion', 'recoleccion', 'formulacion', 'organizacion', 'experiencia', 'resultados', 'materiales', 'evaluacion']:
+            label_text = label.capitalize()
+            doc.add_heading(label_text, level=3)
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', abpj.get(label, '')))
+            if label == 'evaluacion':
+                for img_path in abpj.get('rubrica_paths', []):
+                    try:
+                        doc.add_picture(img_path, width=Inches(4))
+                    except Exception:
+                        doc.add_paragraph(f"[Imagen: {os.path.basename(img_path)}]")
+    else:
+        doc.add_heading('Secuencia Didáctica', level=2)
+        for day in d['planeacion'].get('secuencia_diaria', []):
+            doc.add_heading(day.get('dia_nombre', ''), level=3)
+            doc.add_paragraph('Inicio:')
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('inicio','')))
+            doc.add_paragraph('Desarrollo:')
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('desarrollo','')))
+            doc.add_paragraph('Cierre:')
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('cierre','')))
+            doc.add_paragraph('Materiales:')
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('materiales','')))
+            doc.add_paragraph('Evaluación:')
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('evaluacion','')))
+            for img_path in day.get('rubrica_paths', []):
+                try:
+                    doc.add_picture(img_path, width=Inches(4))
+                except Exception:
+                    doc.add_paragraph(f"[Imagen: {os.path.basename(img_path)}]")
 
     bio = io.BytesIO()
     doc.save(bio)
