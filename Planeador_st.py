@@ -9,14 +9,19 @@ import base64
 from streamlit_quill import st_quill
 from PIL import Image
 import hashlib
+import requests
 
 # --- ReportLab Imports ---
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak
+from reportlab.platypus import ListFlowable, ListItem
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
 from reportlab.lib import colors
+from reportlab.platypus.doctemplate import Indenter
+from docx import Document
+from docx.shared import Inches
 
 # --- Configuration ---
 st.set_page_config(page_title="Planeador Docente IMM", page_icon="📝", layout="wide")
@@ -74,16 +79,71 @@ def html_to_reportlab(html_text):
     # Underline
     text = text.replace("<u>", "<u>").replace("</u>", "</u>")
     
-    # Lists
-    text = text.replace("<ul>", "").replace("</ul>", "")
-    text = text.replace("<ol>", "").replace("</ol>", "")
-    text = text.replace("<li>", "<br/>• ").replace("</li>", "")
+    # Keep list markers; actual conversion to flowables handled later
+    text = text.replace("<ul>", "<ul>").replace("</ul>", "</ul>")
+    text = text.replace("<ol>", "<ol>").replace("</ol>", "</ol>")
+    text = text.replace("<li>", "<li>").replace("</li>", "</li>")
     
     # Clean up initial <br/> if any
     if text.startswith("<br/>"):
         text = text[5:]
             
     return text
+
+
+def html_to_flowables(html_text, styles, bullet_indent=12):
+    """
+    Convert basic Quill-like HTML into a list of ReportLab flowables (Paragraphs, ListFlowable).
+    Supports <b>, <i>, <u>, <br/>, <ul>, <ol>, <li>.
+    """
+    if not html_text:
+        return []
+    s = str(html_text)
+    # Normalize newlines
+    s = s.replace('\r', '')
+
+    flowables = []
+    # Find list blocks and plain blocks
+    tokens = re.split(r'(<ul>|</ul>|<ol>|</ol>)', s)
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ('<ul>', '<ol>'):
+            list_type = tok
+            i += 1
+            items = ''
+            while i < len(tokens) and tokens[i] not in ('</ul>', '</ol>'):
+                items += tokens[i]
+                i += 1
+            li_items = re.findall(r'<li>(.*?)</li>', items, flags=re.DOTALL)
+            list_flow = []
+            for li in li_items:
+                txt = html_to_reportlab(li)
+                p = Paragraph(txt, styles['Normal'])
+                list_flow.append(ListItem(p))
+            lf = ListFlowable(list_flow, bulletType='bullet' if list_type == '<ul>' else '1', leftIndent=bullet_indent)
+            flowables.append(lf)
+            i += 1
+        else:
+            if tok and tok.strip():
+                txt = html_to_reportlab(tok)
+                # split into paragraphs by double <br/>
+                for seg in re.split(r'(?:<br\s*/?>){2,}', txt):
+                    seg = seg.strip()
+                    if not seg:
+                        continue
+                    p = Paragraph(seg, styles['Normal'])
+                    flowables.append(p)
+            i += 1
+
+    return flowables
+
+
+def safe_filename(s):
+    # Remove or replace characters invalid in Windows filenames
+    s = re.sub(r'[\\/:*?"<>|]', '-', str(s))
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
 
 def _embed_image_to_pdf(path, content_list, page_width):
     if path and os.path.exists(path):
@@ -243,12 +303,14 @@ def get_current_pda():
 
 def init_session_state():
     defaults = {
+    "logged_in": False,
         "docente_titulo": "Dr.",
         "docente_nombre": "",
         "curso_grado": "1ro",
         "curso_grupos": [],
         "curso_materia": "Matematicas",
         "curso_campo": "Lenguajes",
+        "curso_bilingue": False,
         "plan_metodologia": "Seleccione metodología",
         "plan_fecha_inicio": date.today(),
         "plan_fecha_fin": date.today(),
@@ -264,6 +326,7 @@ def init_session_state():
         "pda_custom_active": False,
         "pda_selected": "",
         "pda_custom": "",
+        "pda_entries": [],
         "text_objetivos": "",
         "text_perfiles": "",
         "text_producto": "",
@@ -275,7 +338,7 @@ def init_session_state():
         "abpj_resultados": "",
         "abpj_materiales": "",
         "abpj_evaluacion": "",
-        "abpj_rubrica_path": None,
+        "abpj_rubrica_paths": [],
         "daily_plan_data": {},
         "last_loaded_file_id": None,
         "quill_key_suffix": 0 # Force Quill refresh
@@ -515,7 +578,13 @@ with st.sidebar:
             st.session_state.abpj_resultados = abpj.get("resultados", st.session_state.abpj_resultados)
             st.session_state.abpj_materiales = abpj.get("materiales", st.session_state.abpj_materiales)
             st.session_state.abpj_evaluacion = abpj.get("evaluacion", st.session_state.abpj_evaluacion)
-            st.session_state.abpj_rubrica_path = abpj.get("rubrica_path", st.session_state.abpj_rubrica_path)
+            # Support both single-path legacy and new list format
+            if abpj.get("rubrica_paths"):
+                st.session_state.abpj_rubrica_paths = abpj.get("rubrica_paths", st.session_state.abpj_rubrica_paths)
+            else:
+                legacy = abpj.get("rubrica_path")
+                if legacy:
+                    st.session_state.abpj_rubrica_paths = [legacy]
 
             daily_list = plan.get("secuencia_diaria", [])
             if isinstance(daily_list, list):
@@ -530,6 +599,88 @@ with st.sidebar:
             st.warning(f"No se pudo restaurar autosave: {e}")
 
     restore_autosave()
+
+
+    def find_appscript_url():
+        # Try to locate an Apps Script URL in helper files
+        candidates = [
+            _get_full_path("Python -  appscript.txt"),
+            _get_full_path("Appscript.txt")
+        ]
+        url_re = re.compile(r'https?://script\.google\.com/macros[^\s\"\']+')
+        for c in candidates:
+            try:
+                if os.path.exists(c):
+                    with open(c, 'r', encoding='utf-8') as f:
+                        txt = f.read()
+                    m = url_re.search(txt)
+                    if m:
+                        return m.group(0)
+            except Exception:
+                continue
+        return ""
+
+
+    # --- Login / Register (Apps Script) ---
+    APPS_SCRIPT_URL = find_appscript_url()
+
+    if not st.session_state.get("logged_in", False):
+        st.title("Acceso al Planeador - IMM")
+        tab_login, tab_register = st.tabs(["🔑 Iniciar Sesión", "📝 Registrarme"])
+
+        with tab_login:
+            st.subheader("Ingreso para Docentes")
+            docente_id = st.text_input("Ingrese su ID de Docente:", type="password", key="login_id_input")
+            if st.button("Ingresar"):
+                if not docente_id.strip():
+                    st.warning("Por favor, ingrese un ID válido.")
+                else:
+                    if not APPS_SCRIPT_URL:
+                        st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
+                    else:
+                        with st.spinner("Verificando acceso..."):
+                            try:
+                                payload = {"action": "login", "teacher_id": docente_id.strip()}
+                                res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=12)
+                                data = res.json()
+                                if data.get("success"):
+                                    st.session_state.logged_in = True
+                                    st.session_state.docente_titulo = data.get("title", st.session_state.docente_titulo)
+                                    st.session_state.docente_nombre = data.get("name", st.session_state.docente_nombre)
+                                    st.experimental_rerun()
+                                else:
+                                    st.error(data.get("message", "Error al iniciar sesión."))
+                            except Exception as e:
+                                st.error(f"Error de conexión con la base de datos: {e}")
+
+        with tab_register:
+            st.subheader("Registro de Solicitud de Acceso")
+            st.caption("Nota: Su solicitud será enviada para aprobación previa al administrador.")
+            with st.form("form_registro_docente"):
+                reg_id = st.text_input("ID de Docente:")
+                reg_title = st.selectbox("Título Profesional:", ["Dr.", "Dra.", "Mtro.", "Mtra.", "Lic.", "Prof.", "Pasante"], key="reg_title")
+                reg_name = st.text_input("Nombre Completo:")
+                btn_registro = st.form_submit_button("Registrar y Solicitar Aprobación")
+                if btn_registro:
+                    if not reg_id.strip() or not reg_name.strip():
+                        st.warning("Complete todos los campos.")
+                    else:
+                        if not APPS_SCRIPT_URL:
+                            st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
+                        else:
+                            with st.spinner("Enviando solicitud..."):
+                                try:
+                                    payload = {"action": "register", "teacher_id": reg_id.strip(), "title": reg_title, "name": reg_name.strip()}
+                                    res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=12)
+                                    data = res.json()
+                                    if data.get("success"):
+                                        st.success(data.get("message"))
+                                    else:
+                                        st.error(data.get("message", "Error en registro."))
+                                except Exception as e:
+                                    st.error(f"Error de conexión con el servidor: {e}")
+
+        st.stop()
 
     def get_current_data():
         daily_sequence = []
@@ -552,7 +703,7 @@ with st.sidebar:
                         else:
                             daily_sequence.append({
                                 "dia_nombre": key, "inicio": "", "desarrollo": "", "cierre": "",
-                                "materiales": "", "evaluacion": "", "rubrica_path": ""
+                                    "materiales": "", "evaluacion": "", "rubrica_paths": []
                             })
 
         return {
@@ -573,6 +724,7 @@ with st.sidebar:
                 "dias_planeados": st.session_state.plan_dias,
                 "problematica": st.session_state.text_problematica,
                 "pda": get_current_pda(),
+                "pda_entries": st.session_state.get("pda_entries", []),
                 "pda_custom_active": st.session_state.get("pda_custom_active", False),
                 "pda_selected": st.session_state.get("pda_selected", ""),
                 "pda_custom": st.session_state.get("pda_custom", ""),
@@ -594,7 +746,7 @@ with st.sidebar:
                     "resultados": st.session_state.abpj_resultados,
                     "materiales": st.session_state.abpj_materiales,
                     "evaluacion": st.session_state.abpj_evaluacion,
-                    "rubrica_path": st.session_state.abpj_rubrica_path
+                    "rubrica_paths": st.session_state.get("abpj_rubrica_paths", [])
                 },
                 "secuencia_diaria": daily_sequence
             }
@@ -642,7 +794,8 @@ with tab1:
         with c1:
             st.selectbox("Grado", ["1ro", "2do", "3ro"], key="curso_grado")
         with c2:
-            st.multiselect("Grupos", LISTA_GRUPOS, key="curso_grupos")
+                st.multiselect("Grupos", LISTA_GRUPOS, key="curso_grupos")
+                st.checkbox("Bilingüe", key="curso_bilingue")
         
         st.selectbox("Materia", LISTA_MATERIAS, key="curso_materia")
         st.selectbox("Campo Formativo", LISTA_CAMPOS, key="curso_campo")
@@ -690,12 +843,21 @@ with tab3:
     )
     
     if st.session_state.pda_custom_active:
-        st.session_state.pda_custom = st_quill(
-            value=st.session_state.pda_custom,
-            placeholder="Redacte su PDA personalizado (Codiseño)...",
-            toolbar=toolbar,
-            key=f"quill_pda_custom_{ks}"
-        )
+        # Allow multiple PDA entries
+        if not st.session_state.get("pda_entries"):
+            st.session_state.pda_entries = [st.session_state.get("pda_custom", "")]
+
+        new_entries = []
+        for idx, entry in enumerate(st.session_state.pda_entries):
+            val = st_quill(value=entry, placeholder=f"PDA {idx+1}", toolbar=toolbar, key=f"quill_pda_custom_{ks}_{idx}")
+            if st.button(f"Eliminar PDA {idx+1}", key=f"del_pda_{idx}"):
+                continue
+            new_entries.append(val)
+
+        if st.button("+ Agregar PDA"):
+            new_entries.append("")
+
+        st.session_state.pda_entries = new_entries
     else:
         pdas_list = get_pdas_for_selection(st.session_state.curso_materia, st.session_state.curso_grado)
         if not pdas_list:
@@ -718,6 +880,9 @@ with tab3:
             selected_record = pdas_list[options.index(st.session_state.pda_selected)] if st.session_state.pda_selected in options else None
             if selected_record:
                 st.caption(f"**Contenido del Plan Sintético asociado:** {selected_record['contenido']}")
+                # ensure single selected PDA is present in entries
+                if not st.session_state.get("pda_entries"):
+                    st.session_state.pda_entries = [selected_record.get('pda', '')]
     st.session_state.text_objetivos = st_quill(value=st.session_state.text_objetivos, placeholder="Objetivos", toolbar=toolbar, key=f"quill_obj_{ks}")
     st.session_state.text_perfiles = st_quill(value=st.session_state.text_perfiles, placeholder="Perfiles de Egreso", toolbar=toolbar, key=f"quill_perf_{ks}")
     st.session_state.text_producto = st_quill(value=st.session_state.text_producto, placeholder="Producto Final", toolbar=toolbar, key=f"quill_prod_{ks}")
@@ -749,11 +914,14 @@ with tab4:
                 temp_path = f"temp_rubric_abpj_{uploaded_rubric.name}"
                 with open(temp_path, "wb") as f:
                     f.write(uploaded_rubric.getbuffer())
-                st.session_state.abpj_rubrica_path = os.path.abspath(temp_path)
+                # support multiple rubric images
+                lst = st.session_state.get("abpj_rubrica_paths", [])
+                lst.append(os.path.abspath(temp_path))
+                st.session_state.abpj_rubrica_paths = lst
                 st.success(f"Rúbrica cargada: {uploaded_rubric.name}")
             
-            if st.session_state.abpj_rubrica_path:
-                st.caption(f"Rúbrica actual: {os.path.basename(st.session_state.abpj_rubrica_path)}")
+            if st.session_state.get("abpj_rubrica_paths"):
+                st.caption(f"Rúbricas actuales: {', '.join([os.path.basename(x) for x in st.session_state.abpj_rubrica_paths])}")
 
     elif st.session_state.plan_metodologia != "Seleccione metodología":
         st.markdown(f"### Planeación Diaria ({st.session_state.plan_metodologia})")
@@ -784,7 +952,7 @@ with tab4:
                 if key_base not in st.session_state.daily_plan_data:
                     st.session_state.daily_plan_data[key_base] = {
                         "dia_nombre": key_base, "inicio": "", "desarrollo": "", "cierre": "",
-                        "materiales": "", "evaluacion": "", "rubrica_path": ""
+                        "materiales": "", "evaluacion": "", "rubrica_paths": []
                     }
                 
                 day_data = st.session_state.daily_plan_data[key_base]
@@ -799,12 +967,16 @@ with tab4:
                     with c4: day_data["materiales"] = st_quill(value=day_data["materiales"], placeholder="Materiales", key=f"mat_{key_base}_{ks}", toolbar=toolbar_simple)
                     with c5: 
                         day_data["evaluacion"] = st_quill(value=day_data["evaluacion"], placeholder="Evaluación", key=f"eval_{key_base}_{ks}", toolbar=toolbar_simple)
-                        u_rubric = st.file_uploader("Rúbrica", type=["png", "jpg"], key=f"up_{key_base}")
-                        if u_rubric:
-                            t_path = f"temp_rubric_{i}_{u_rubric.name}"
-                            with open(t_path, "wb") as f: f.write(u_rubric.getbuffer())
-                            day_data["rubrica_path"] = os.path.abspath(t_path)
-                            st.success("Imagen cargada")
+                        u_rubrics = st.file_uploader("Rúbrica (puede subir varias)", type=["png", "jpg"], key=f"up_{key_base}", accept_multiple_files=True)
+                        if u_rubrics:
+                            lst = day_data.get("rubrica_paths", [])
+                            for uploaded in u_rubrics:
+                                t_path = f"temp_rubric_{i}_{uploaded.name}"
+                                with open(t_path, "wb") as f:
+                                    f.write(uploaded.getbuffer())
+                                lst.append(os.path.abspath(t_path))
+                            day_data["rubrica_paths"] = lst
+                            st.success("Imágenes cargadas")
 
 # --- AI Prompt Generation ---
 st.markdown("---")
@@ -852,6 +1024,35 @@ if st.button("✨ Generar Prompt IA"):
 
     st.code(prompt, language="text")
     st.info("Copia el texto de arriba y pégalo en tu IA favorita (ChatGPT, Gemini, DeepSeek).")
+    # If bilingual option is active, generate an English prompt as well
+    if st.session_state.get("curso_bilingue"):
+        def translate_prompt_to_english(sp):
+            # Lightweight, rule-based transformation of headings and fixed phrases
+            tr = sp
+            replacements = {
+                "Actúa como un docente experto de secundaria en México (SEP, Nueva Escuela Mexicana).": "Act as an experienced secondary school teacher in Mexico (SEP, New Mexican School).",
+                "Genera una planeación didáctica": "Generate a didactic lesson plan",
+                "Grado":"Grade",
+                "Campo Formativo":"Field",
+                "Metodología":"Methodology",
+                "Temporalidad":"Duration",
+                "Días de clase":"Class days",
+                "Problemática Contextual":"Contextual problem",
+                "PDA":"PDA",
+                "Objetivos":"Objectives",
+                "Perfil de Egreso":"Graduate profile",
+                "Producto Final":"Final product",
+                "Secuencia didáctica":"Didactic sequence",
+                "Inicio":"Start",
+                "Desarrollo":"Development",
+                "Cierre":"Closure",
+            }
+            for k, v in replacements.items():
+                tr = tr.replace(k, v)
+            return tr
+
+        en_prompt = translate_prompt_to_english(prompt)
+        st.code(en_prompt, language="text")
 
 # --- PDF Generation ---
 def generate_pdf_bytes():
@@ -896,8 +1097,8 @@ def generate_pdf_bytes():
     d = get_current_data()
     p = d['planeacion']
     
-    P = lambda x: Paragraph(html_to_reportlab(str(x)), styles['Normal'])
     PB = lambda x: Paragraph(f"<b>{x}</b>", styles['Normal'])
+    P = lambda x: Paragraph(html_to_reportlab(str(x)), styles['Normal'])
     
     grupos_str = ", ".join(d['curso']['grupos'])
     docente_name = f"{d['docente']['titulo']} {d['docente']['nombre']}"
@@ -938,20 +1139,35 @@ def generate_pdf_bytes():
         pda_label = "Proceso de Desarrollo de Aprendizaje (PDA):"
         pda_legend = "Plan Sintético (oficial)" if p.get("pda_selected", "") else None
 
-    # Build main data rows; for PDA cell allow legend under the main paragraph
-    pda_cell = P(p['pda'])
-    if pda_legend:
-        pda_cell = [pda_cell, Paragraph(f"<i>{pda_legend}</i>", ParagraphStyle(name='SmallItalic', parent=styles['Normal'], fontSize=8))]
-
-    main_data = [
-        [t0], [t1],
-        [PB("Materia:"), P(d['curso']['materia'])], [PB("Metodología:"), P(p['metodologia'])],
-        [PB("Ejes:"), P(ejes)], [PB("Vinculación:"), P(disc)],
-        [PB("Problemática:"), P(p['problematica'])], [PB(pda_label), pda_cell],
-        [PB("Objetivos:"), P(p['objetivos'])], [PB("Perfiles:"), P(p['perfiles'])],
-        [PB("Temporalidad:"), P(temp_str)], [PB("Producto:"), P(p['producto'])]
+    # Build main data rows with safe splitting: if content is very large, place it outside the table
+    rows = [
+        ("Materia:", p['materia'] if 'materia' in p else d['curso']['materia']),
+        ("Metodología:", p['metodologia']),
+        ("Ejes:", ejes),
+        ("Vinculación:", disc),
+        ("Problemática:", p['problematica']),
+        (pda_label, p.get('pda') or (p.get('pda_selected') or p.get('pda_custom', ''))),
+        ("Objetivos:", p['objetivos']),
+        ("Perfiles:", p['perfiles']),
+        ("Temporalidad:", temp_str),
+        ("Producto:", p['producto'])
     ]
-    main_table = Table(main_data, colWidths=[2.0*inch, page_width - 2.0*inch])
+
+    small_table_rows = [[t0], [t1]]
+    for label, content_html in rows:
+        plain = re.sub(r'<[^>]+>', '', str(content_html or ''))
+        if len(plain) > 900 or plain.count('\n') > 20:
+            # Append as full-width block
+            elements.append(PB(label))
+            flowables = html_to_flowables(content_html, styles)
+            for f in flowables:
+                elements.append(f)
+        else:
+            # small enough to include in table
+            cell_flow = html_to_reportlab(str(content_html))
+            small_table_rows.append([PB(label), Paragraph(cell_flow, styles['Normal'])])
+
+    main_table = Table(small_table_rows, colWidths=[2.0*inch, page_width - 2.0*inch])
     main_table.setStyle(TableStyle([
         ('GRID', (0,0), (-1,-1), 1, colors.black),
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
@@ -972,10 +1188,14 @@ def generate_pdf_bytes():
         campos = [("Presentación", "presentacion"), ("Recolección", "recoleccion"), ("Formulación", "formulacion"), ("Organización", "organizacion"), ("Vivamos", "experiencia"), ("Resultados", "resultados"), ("Materiales", "materiales"), ("Evaluación", "evaluacion")]
         
         for label, key in campos:
-            content = [P(abpj.get(key, ""))]
+            content_html = abpj.get(key, "")
+            # use flowables list
+            flowables = html_to_flowables(content_html, styles)
             if key == "evaluacion":
-                _embed_image_to_pdf(abpj.get("rubrica_path"), content, page_width - 2.0*inch)
-            seq_data.append([PB(label), content])
+                # embed multiple images
+                for img_path in abpj.get("rubrica_paths", []):
+                    _embed_image_to_pdf(img_path, flowables, page_width - 2.0*inch)
+            seq_data.append([PB(label), flowables])
         
         st_table = Table(seq_data, colWidths=[2.0*inch, page_width - 2.0*inch])
         st_table.setStyle(TableStyle([
@@ -993,15 +1213,16 @@ def generate_pdf_bytes():
         daily = p['secuencia_diaria']
         for i, day in enumerate(daily):
             elements.append(Paragraph(f"<b>{day['dia_nombre']}</b>", styles['Normal']))
-            eval_content = [P(day.get("evaluacion", ""))]
-            _embed_image_to_pdf(day.get("rubrica_path"), eval_content, page_width - 2.0*inch)
+            eval_flow = html_to_flowables(day.get("evaluacion", ""), styles)
+            for img_path in day.get("rubrica_paths", []):
+                _embed_image_to_pdf(img_path, eval_flow, page_width - 2.0*inch)
             
-            d_data = [
-                [PB("Inicio"), P(day.get("inicio", ""))],
-                [PB("Desarrollo"), P(day.get("desarrollo", ""))],
-                [PB("Cierre"), P(day.get("cierre", ""))],
-                [PB("Materiales"), P(day.get("materiales", ""))],
-                [PB("Evaluación"), eval_content]
+                d_data = [
+                [PB("Inicio"), Paragraph(html_to_reportlab(day.get("inicio", "")), styles['Normal'])],
+                [PB("Desarrollo"), Paragraph(html_to_reportlab(day.get("desarrollo", "")), styles['Normal'])],
+                [PB("Cierre"), Paragraph(html_to_reportlab(day.get("cierre", "")), styles['Normal'])],
+                [PB("Materiales"), Paragraph(html_to_reportlab(day.get("materiales", "")), styles['Normal'])],
+                [PB("Evaluación"), eval_flow]
             ]
             dt = Table(d_data, colWidths=[2.0*inch, page_width - 2.0*inch])
             dt.setStyle(TableStyle([
@@ -1055,11 +1276,70 @@ def generate_pdf_bytes():
     buffer.seek(0)
     return buffer
 
-st.markdown("### Generar Documento")
-if st.button("📄 Generar PDF"):
+
+def generate_docx_bytes():
+    d = get_current_data()
+    doc = Document()
+    doc.add_heading('Planeación Docente', level=1)
+    curso = d['curso']
+    docente = d['docente']
+    doc.add_paragraph(f"Escuela: Instituto Mexicano Madero")
+    doc.add_paragraph(f"Docente: {docente.get('titulo','')} {docente.get('nombre','')}")
+    doc.add_paragraph(f"Materia: {curso.get('materia','')}")
+    doc.add_paragraph(f"Grado: {curso.get('grado','')} Grupos: {', '.join(curso.get('grupos',[]))}")
+
+    p = d['planeacion']
+    doc.add_heading('Contenido Pedagógico', level=2)
+    # PDAs
+    pdas = d['planeacion'].get('pda_entries') or []
+    if pdas:
+        doc.add_heading('PDA(s)', level=3)
+        for idx, pd in enumerate(pdas):
+            doc.add_paragraph(re.sub(r'<[^>]+>', '', pd), style='List Bullet')
+
+    # Secuencia diaria
+    doc.add_heading('Secuencia Didáctica', level=2)
+    for day in d['planeacion'].get('secuencia_diaria', []):
+        doc.add_heading(day.get('dia_nombre', ''), level=3)
+        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('inicio','')))
+        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('desarrollo','')))
+        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('cierre','')))
+        doc.add_paragraph('Materiales:')
+        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('materiales','')))
+        doc.add_paragraph('Evaluación:')
+        doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('evaluacion','')))
+        for img_path in day.get('rubrica_paths', []):
+            try:
+                doc.add_picture(img_path, width=Inches(4))
+            except Exception:
+                doc.add_paragraph(f"[Imagen: {os.path.basename(img_path)}]")
+
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+
+st.markdown("### Descargar Planeación")
+download_choice = st.selectbox("Formato de descarga:", ["PDF", "WORD", "PDF + WORD"]) 
+if st.button("📥 Generar y Descargar"):
     try:
-        pdf_bytes = generate_pdf_bytes()
-        st.download_button(label="Descargar PDF", data=pdf_bytes, file_name="Planeacion.pdf", mime="application/pdf")
-        st.success("PDF Generado listo para descargar.")
+        # build filename
+        d = get_current_data()
+        periodo = f"{date.fromisoformat(d['planeacion']['fecha_inicio']).strftime('%d %b')} - {date.fromisoformat(d['planeacion']['fecha_fin']).strftime('%d %b %Y')}"
+        grado = f"{d['curso'].get('grado','')}-{' '.join(d['curso'].get('grupos',[]))}"
+        docente_str = f"{d['docente'].get('titulo','')} {d['docente'].get('nombre','') }"
+        base_name = f"Planeacion-{periodo}-{d['curso'].get('materia','')}-{grado}-{docente_str}"
+        base_name = safe_filename(base_name)
+
+        if download_choice in ("PDF", "PDF + WORD"):
+            pdf_buf = generate_pdf_bytes()
+            st.download_button(label="Descargar PDF", data=pdf_buf, file_name=base_name + ".pdf", mime="application/pdf")
+
+        if download_choice in ("WORD", "PDF + WORD"):
+            docx_buf = generate_docx_bytes()
+            st.download_button(label="Descargar Word", data=docx_buf, file_name=base_name + ".docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+        st.success("Archivos listos para descargar.")
     except Exception as e:
-        st.error(f"Error al generar PDF: {e}")
+        st.error(f"Error al generar los archivos: {e}")

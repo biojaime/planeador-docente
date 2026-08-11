@@ -2,3 +2,4 @@ streamlit
 reportlab
 streamlit-quill
 Pillow
+python-docx

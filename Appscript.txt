@@ -1,0 +1,167 @@
+// ID de tu hoja de cálculo
+const SPREADSHEET_ID = "1wPP2w8sk85fQXTLTixMtS_fSPE5WUq4cDnkk0V5Dppc";
+const OWNER_EMAIL = "jaime.dominguez@imm.edu.mx";
+const SHEET_NAME = "Docentes";
+
+// Función para encriptar / generar Hash del ID con SHA-256 para seguridad
+function hashID(rawId) {
+  var rawStr = rawId.toString().trim();
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, rawStr);
+  var hash = "";
+  for (var i = 0; i < digest.length; i++) {
+    var byteStr = (digest[i] < 0 ? digest[i] + 256 : digest[i]).toString(16);
+    if (byteStr.length === 1) byteStr = "0" + byteStr;
+    hash += byteStr;
+  }
+  return hash;
+}
+
+// Obtener o crear la pestaña de la base de datos
+function getOrCreateSheet() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+    sheet.appendRow(["ID_Hash", "Titulo", "Nombre", "Estado", "Fecha_Registro"]);
+  }
+  return sheet;
+}
+
+// Maneja peticiones POST desde Streamlit (Login y Registro)
+function doPost(e) {
+  try {
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action;
+
+    if (action === "login") {
+      return handleLogin(data.teacher_id);
+    } else if (action === "register") {
+      return handleRegister(data.teacher_id, data.title, data.name);
+    } else {
+      return responseJSON({ success: false, message: "Acción no válida." });
+    }
+  } catch (error) {
+    return responseJSON({ success: false, message: "Error en el servidor: " + error.toString() });
+  }
+}
+
+// Maneja el clic en los enlaces de Aprobación/Rechazo del correo
+function doGet(e) {
+  var action = e.parameter.action;
+  var targetHash = e.parameter.id_hash;
+
+  if (action === "approve" || action === "reject") {
+    var sheet = getOrCreateSheet();
+    var data = sheet.getDataRange().getValues();
+    var found = false;
+
+    for (var i = 1; i < data.length; i++) {
+      if (data[i][0] === targetHash) {
+        found = true;
+        if (action === "approve") {
+          sheet.getRange(i + 1, 4).setValue("APROBADO");
+          return ContentService.createTextOutput("✅ El acceso del docente ha sido APROBADO correctamente. Ya puede ingresar al planeador.");
+        } else {
+          sheet.getRange(i + 1, 4).setValue("RECHAZADO");
+          return ContentService.createTextOutput("❌ El acceso del docente ha sido RECHAZADO.");
+        }
+      }
+    }
+    if (!found) {
+      return ContentService.createTextOutput("No se encontró la solicitud correspondiente.");
+    }
+  }
+
+  return ContentService.createTextOutput("Servicio de Apps Script Activo.");
+}
+
+// Proceso de Inicio de Sesión
+function handleLogin(rawId) {
+  var hashed = hashID(rawId);
+  var sheet = getOrCreateSheet();
+  var data = sheet.getDataRange().getValues();
+
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === hashed) {
+      var status = data[i][3];
+      if (status === "APROBADO") {
+        return responseJSON({
+          success: true,
+          title: data[i][1],
+          name: data[i][2],
+          message: "Acceso concedido."
+        });
+      } else if (status === "PENDIENTE") {
+        return responseJSON({
+          success: false,
+          message: "Tu solicitud de registro está pendiente de aprobación por el administrador."
+        });
+      } else if (status === "RECHAZADO") {
+        return responseJSON({
+          success: false,
+          message: "Tu solicitud de registro fue rechazada. Contacta a administración."
+        });
+      }
+    }
+  }
+
+  return responseJSON({ success: false, message: "El ID ingresado no está registrado en el sistema." });
+}
+
+// Proceso de Registro
+function handleRegister(rawId, title, name) {
+  var hashed = hashID(rawId);
+  var sheet = getOrCreateSheet();
+  var data = sheet.getDataRange().getValues();
+
+  // Validar si el ID ya existe
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === hashed) {
+      return responseJSON({
+        success: false,
+        message: "Este ID ya se encuentra registrado o en proceso de aprobación."
+      });
+    }
+  }
+
+  // Guardar en la hoja con estado PENDIENTE
+  sheet.appendRow([hashed, title, name, "PENDIENTE", new Date().toLocaleString()]);
+
+  // Obtener URL de Apps Script para los botones del correo
+  var scriptUrl = ScriptApp.getService().getUrl();
+  var approveUrl = scriptUrl + "?action=approve&id_hash=" + encodeURIComponent(hashed);
+  var rejectUrl = scriptUrl + "?action=reject&id_hash=" + encodeURIComponent(hashed);
+
+  // Redactar y enviar correo de aprobación al Propietario
+  var subject = "📌 Solicitud de Registro de Docente - Planeador IMM";
+  var htmlBody = `
+    <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #dcdcdc; border-radius: 8px; max-width: 500px;">
+      <h2 style="color: #1a252f;">Nueva Solicitud de Registro</h2>
+      <p>Un nuevo docente ha solicitado acceso al planeador:</p>
+      <ul>
+        <li><strong>Título:</strong> ${title}</li>
+        <li><strong>Nombre Completo:</strong> ${name}</li>
+        <li><strong>ID Encriptado (SHA-256):</strong> <code style="font-size:11px;">${hashed}</code></li>
+      </ul>
+      <p>Haga clic en una opción para gestionar el acceso:</p>
+      <div style="margin-top: 25px;">
+        <a href="${approveUrl}" style="background-color: #27ae60; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; margin-right: 10px;">Aprobar Acceso</a>
+        <a href="${rejectUrl}" style="background-color: #e74c3c; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">Rechazar Acceso</a>
+      </div>
+    </div>
+  `;
+
+  GmailApp.sendEmail(OWNER_EMAIL, subject, "Nueva solicitud de acceso registrada.", {
+    htmlBody: htmlBody
+  });
+
+  return responseJSON({
+    success: true,
+    message: "Solicitud enviada con éxito. Se ha enviado una notificación a jaime.dominguez@imm.edu.mx para autorizar tu registro."
+  });
+}
+
+function responseJSON(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}

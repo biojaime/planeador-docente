@@ -1,0 +1,115 @@
+import streamlit as st
+import requests
+
+# ⚠️ REEMPLAZA ESTA URL CON TU URL DE APPS SCRIPT PUBLICADA (/exec)
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyFfyYSu7SDPezJNyWeeJjbCMb3Lk0Ue2E7sVhBBN1Aj4Vqr-YCdn_T3U3TeWiNRpMy/exec"
+
+st.set_page_config(page_title="Planeador Académico IMM", page_icon="📚", layout="centered")
+
+# Variables de sesión de Streamlit
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "docente_title" not in st.session_state:
+    st.session_state.docente_title = ""
+if "docente_name" not in st.session_state:
+    st.session_state.docente_name = ""
+
+# ==========================================
+# VISTA 1: PLANEADOR (DOCENTE AUTENTICADO)
+# ==========================================
+if st.session_state.logged_in:
+    st.title("📚 Planeador Académico")
+    
+    # Muestra Título + Nombre
+    st.header(f"Bienvenido(a), {st.session_state.docente_title} {st.session_state.docente_name}")
+    st.markdown("---")
+    
+    st.success("Acceso concedido al sistema de planeación.")
+    
+    # Áreas de trabajo del planeador
+    st.subheader("Planeación de Clases")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("🗓️ **Planificador Semanal**")
+        st.text_area("Objetivos y temas de la semana:", placeholder="Escriba la planeación de sus materias aquí...")
+    with col2:
+        st.info("📋 **Evaluaciones y Criterios**")
+        st.text_area("Tareas y proyectos:", placeholder="Detalle los entregables...")
+
+    st.markdown("---")
+    if st.button("Cerrar Sesión", type="secondary"):
+        st.session_state.logged_in = False
+        st.session_state.docente_title = ""
+        st.session_state.docente_name = ""
+        st.rerun()
+
+# ==========================================
+# VISTA 2: INICIO DE SESIÓN Y REGISTRO
+# ==========================================
+else:
+    st.title("Acceso al Planeador - IMM")
+    
+    tab_login, tab_register = st.tabs(["🔑 Iniciar Sesión", "📝 Registrar Nuevo Docente"])
+    
+    # --------------------------------------
+    # PESTAÑA: LOGIN
+    # --------------------------------------
+    with tab_login:
+        st.subheader("Ingreso para Docentes")
+        docente_id = st.text_input("Ingrese su ID de Docente:", type="password", key="login_id")
+        
+        if st.button("Ingresar", type="primary", use_container_width=True):
+            if not docente_id.strip():
+                st.warning("Por favor, ingrese un ID válido.")
+            else:
+                with st.spinner("Verificando acceso..."):
+                    try:
+                        payload = {"action": "login", "teacher_id": docente_id.strip()}
+                        res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=12)
+                        data = res.json()
+                        
+                        if data.get("success"):
+                            st.session_state.logged_in = True
+                            st.session_state.docente_title = data.get("title")
+                            st.session_state.docente_name = data.get("name")
+                            st.rerun()
+                        else:
+                            st.error(data.get("message", "Error al iniciar sesión."))
+                    except Exception as e:
+                        st.error(f"Error de conexión con la base de datos: {e}")
+
+    # --------------------------------------
+    # PESTAÑA: REGISTRO
+    # --------------------------------------
+    with tab_register:
+        st.subheader("Registro de Solicitud de Acceso")
+        st.caption("Nota: Su solicitud será enviada a jaime.dominguez@imm.edu.mx para aprobación previa.")
+        
+        with st.form("form_registro_docente"):
+            reg_id = st.text_input("ID de Docente:", help="ID único asignado.")
+            reg_title = st.selectbox("Título Profesional:", ["Dr.", "Dra.", "Mtro.", "Mtra.", "Lic.", "Prof.", "Profa.", "Ing."])
+            reg_name = st.text_input("Nombre Completo:", placeholder="Ej. Juan Pérez González")
+            
+            btn_registro = st.form_submit_button("Registrar y Solicitar Aprobación", use_container_width=True)
+            
+            if btn_registro:
+                if not reg_id.strip() or not reg_name.strip():
+                    st.warning("Por favor complete todos los campos requeridos.")
+                else:
+                    with st.spinner("Procesando registro y enviando correo al administrador..."):
+                        try:
+                            payload = {
+                                "action": "register",
+                                "teacher_id": reg_id.strip(),
+                                "title": reg_title,
+                                "name": reg_name.strip()
+                            }
+                            res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=12)
+                            data = res.json()
+                            
+                            if data.get("success"):
+                                st.success(data.get("message"))
+                            else:
+                                st.error(data.get("message", "Error al procesar el registro."))
+                        except Exception as e:
+                            st.error(f"Error de conexión con el servidor: {e}")
