@@ -10,6 +10,8 @@ from streamlit_quill import st_quill
 from PIL import Image
 import hashlib
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- ReportLab Imports ---
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak
@@ -621,6 +623,30 @@ with st.sidebar:
         return ""
 
 
+    def post_apps_script(payload, timeout=30):
+        """Post JSON to APPS_SCRIPT_URL with retries and diagnostics.
+
+        Returns: dict (json) on success. Raises Exception with details on failure.
+        """
+        if not APPS_SCRIPT_URL:
+            raise RuntimeError("Apps Script URL not configured or found.")
+
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=(500, 502, 503, 504))
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+
+        try:
+            resp = session.post(APPS_SCRIPT_URL, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except Exception:
+                raise RuntimeError(f"Respuesta no JSON ({resp.status_code}): {resp.text[:500]}")
+        except requests.exceptions.RequestException as e:
+            # include some diagnostics
+            raise RuntimeError(f"Error al comunicarse con Apps Script: {e}")
+
+
     # --- Login / Register (Apps Script) ---
     APPS_SCRIPT_URL = find_appscript_url()
 
@@ -631,6 +657,16 @@ with st.sidebar:
         with tab_login:
             st.subheader("Ingreso para Docentes")
             docente_id = st.text_input("Ingrese su ID de Docente:", type="password", key="login_id_input")
+            if st.button("Probar conexión Apps Script"):
+                if not APPS_SCRIPT_URL:
+                    st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
+                else:
+                    try:
+                        r = requests.get(APPS_SCRIPT_URL, timeout=20)
+                        st.success(f"Conexión OK — código {r.status_code}")
+                        st.text(r.text[:800])
+                    except Exception as e:
+                        st.error(f"Error al conectar: {e}")
             if st.button("Ingresar"):
                 if not docente_id.strip():
                     st.warning("Por favor, ingrese un ID válido.")
@@ -641,8 +677,7 @@ with st.sidebar:
                         with st.spinner("Verificando acceso..."):
                             try:
                                 payload = {"action": "login", "teacher_id": docente_id.strip()}
-                                res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=12)
-                                data = res.json()
+                                data = post_apps_script(payload, timeout=30)
                                 if data.get("success"):
                                     st.session_state.logged_in = True
                                     st.session_state.docente_titulo = data.get("title", st.session_state.docente_titulo)
@@ -671,8 +706,7 @@ with st.sidebar:
                             with st.spinner("Enviando solicitud..."):
                                 try:
                                     payload = {"action": "register", "teacher_id": reg_id.strip(), "title": reg_title, "name": reg_name.strip()}
-                                    res = requests.post(APPS_SCRIPT_URL, json=payload, timeout=12)
-                                    data = res.json()
+                                    data = post_apps_script(payload, timeout=30)
                                     if data.get("success"):
                                         st.success(data.get("message"))
                                     else:
