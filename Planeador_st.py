@@ -24,6 +24,7 @@ from reportlab.lib import colors
 from reportlab.platypus.doctemplate import Indenter
 from docx import Document
 from docx.shared import Inches
+import streamlit.components.v1 as components
 
 # --- Configuration ---
 st.set_page_config(page_title="Planeador Docente IMM", page_icon="📝", layout="wide")
@@ -530,7 +531,12 @@ with st.sidebar:
                     try:
                         st.experimental_set_query_params(_reload=int(datetime.now().timestamp()))
                     except Exception:
-                        pass
+                        try:
+                            ts = int(datetime.now().timestamp())
+                            js = f"<script>window.location.href=window.location.pathname + '?_load={ts}';</script>"
+                            components.html(js)
+                        except Exception:
+                            pass
                 st.stop()
             except Exception as e:
                 st.error(f"Error al cargar: {e}")
@@ -713,7 +719,13 @@ with st.sidebar:
                                         try:
                                             st.experimental_set_query_params(_reload=int(datetime.now().timestamp()))
                                         except Exception:
-                                            pass
+                                            try:
+                                                # Final fallback: force reload via injected JS
+                                                ts = int(datetime.now().timestamp())
+                                                js = f"<script>window.location.href=window.location.pathname + '?_login={ts}';</script>"
+                                                components.html(js)
+                                            except Exception:
+                                                pass
                                     # stop current run to allow UI to refresh
                                     st.stop()
                                 else:
