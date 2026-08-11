@@ -7,6 +7,7 @@ from datetime import timedelta, date, datetime
 import io
 import base64
 from streamlit_quill import st_quill
+import streamlit.components.v1 as components
 from PIL import Image
 import hashlib
 # removed requests-based login integration per user request
@@ -254,6 +255,9 @@ def set_docx_landscape(doc):
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width, section.page_height = section.page_height, section.page_width
+
+
+def flatten_image(src_path, force_recreate=False):
     """If image has alpha/transparency, flatten it on white background and return a path to a non-alpha image.
     Caches the flattened image next to the original with suffix `_flat.jpg` to avoid repeating work.
     """
@@ -263,7 +267,6 @@ def set_docx_landscape(doc):
         out_name = os.path.join(dirname, f"{base}_flat.jpg")
 
         if os.path.exists(out_name) and not force_recreate:
-            # quick check: if original is newer than flattened, recreate
             if os.path.getmtime(out_name) >= os.path.getmtime(src_path):
                 return out_name
 
@@ -276,7 +279,6 @@ def set_docx_landscape(doc):
                 bg.save(out_name, "JPEG", quality=95)
                 return out_name
             else:
-                # No alpha, convert to JPEG to ensure consistent rendering
                 im.convert("RGB").save(out_name, "JPEG", quality=95)
                 return out_name
     except Exception:
@@ -954,6 +956,7 @@ with tab4:
             
             if st.session_state.get("abpj_rubrica_paths"):
                 st.caption(f"Rúbricas actuales: {', '.join([os.path.basename(x) for x in st.session_state.abpj_rubrica_paths])}")
+                removed_abpj = False
                 for idx, path in enumerate(st.session_state.abpj_rubrica_paths.copy()):
                     if os.path.exists(path):
                         col_a, col_b = st.columns([4, 1])
@@ -966,9 +969,11 @@ with tab4:
                                     os.remove(path)
                                 except Exception:
                                     pass
-                                st.experimental_rerun()
+                                removed_abpj = True
                     else:
                         st.write(f"Ruta no encontrada: {path}")
+                if removed_abpj:
+                    st.experimental_rerun()
 
     elif st.session_state.plan_metodologia != "Seleccione metodología":
         st.markdown(f"### Planeación Diaria ({st.session_state.plan_metodologia})")
@@ -1025,6 +1030,7 @@ with tab4:
                             day_data["rubrica_paths"] = lst
                             st.success("Imágenes cargadas")
                         if day_data.get("rubrica_paths"):
+                            removed_day_rubric = False
                             for idx, path in enumerate(day_data["rubrica_paths"].copy()):
                                 if os.path.exists(path):
                                     col_a, col_b = st.columns([4, 1])
@@ -1037,9 +1043,11 @@ with tab4:
                                                 os.remove(path)
                                             except Exception:
                                                 pass
-                                            st.experimental_rerun()
+                                            removed_day_rubric = True
                                 else:
                                     st.write(f"Ruta no encontrada: {path}")
+                            if removed_day_rubric:
+                                st.experimental_rerun()
 
 # --- AI Prompt Generation ---
 st.markdown("---")
@@ -1195,6 +1203,8 @@ def generate_pdf_bytes():
         ('RIGHTPADDING', (0,0), (-1,-1), 4)
     ]))
 
+    elements.extend([t0, Spacer(1, 0.1 * inch), t1, Spacer(1, 0.2 * inch)])
+
     # PDA label and optional legend: use the formal name for printouts
     if p.get("pda_custom_active", False):
         pda_label = "PDA redactado como codiseño:"
@@ -1217,7 +1227,7 @@ def generate_pdf_bytes():
         ("Producto:", p['producto'])
     ]
 
-    small_table_rows = [[t0], [t1]]
+    small_table_rows = []
     for label, content_html in rows:
         plain = re.sub(r'<[^>]+>', '', str(content_html or ''))
         if len(plain) > 900 or plain.count('\n') > 20:
@@ -1231,18 +1241,18 @@ def generate_pdf_bytes():
             cell_flow = html_to_reportlab(str(content_html))
             small_table_rows.append([PB(label), Paragraph(cell_flow, styles['Normal'])])
 
-    main_table = Table(small_table_rows, colWidths=[2.0*inch, page_width - 2.0*inch])
-    main_table.setStyle(TableStyle([
-        ('GRID', (0,0), (-1,-1), 1, colors.black),
-        ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('SPAN', (0, 0), (1, 0)), ('SPAN', (0, 1), (1, 1)),
-        ('BACKGROUND', (0,0), (-1,-1), colors.white),
-        ('LEFTPADDING', (0,0), (-1,-1), 6),
-        ('RIGHTPADDING', (0,0), (-1,-1), 6),
-        ('TOPPADDING', (0,0), (-1,-1), 4),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4)
-    ]))
-    elements.append(main_table)
+    if small_table_rows:
+        main_table = Table(small_table_rows, colWidths=[2.0*inch, page_width - 2.0*inch])
+        main_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 1, colors.black),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('BACKGROUND', (0,0), (-1,-1), colors.white),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4)
+        ]))
+        elements.append(main_table)
 
     if "ABPj" in p['metodologia']:
         elements.append(PageBreak())
@@ -1379,7 +1389,8 @@ def generate_docx_bytes():
     if pdas:
         doc.add_heading('PDA(s)', level=3)
         for idx, pd in enumerate(pdas):
-            fill_docx_cell_from_html(doc.add_paragraph(style='List Bullet')._p, pd)
+            para = doc.add_paragraph(style='List Bullet')
+            para.add_run(re.sub(r'<[^>]+>', '', str(pd)))
 
     if 'ABPj' in p.get('metodologia',''):
         doc.add_heading('Secuencia Didáctica ABPj', level=2)
