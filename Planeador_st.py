@@ -9,9 +9,7 @@ import base64
 from streamlit_quill import st_quill
 from PIL import Image
 import hashlib
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+# removed requests-based login integration per user request
 
 # --- ReportLab Imports ---
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak
@@ -24,7 +22,6 @@ from reportlab.lib import colors
 from reportlab.platypus.doctemplate import Indenter
 from docx import Document
 from docx.shared import Inches
-import streamlit.components.v1 as components
 
 # --- Configuration ---
 st.set_page_config(page_title="Planeador Docente IMM", page_icon="📝", layout="wide")
@@ -617,149 +614,7 @@ with st.sidebar:
     restore_autosave()
 
 
-    def find_appscript_url():
-        # Try to locate an Apps Script URL in helper files
-        candidates = [
-            _get_full_path("Python -  appscript.txt"),
-            _get_full_path("Appscript.txt")
-        ]
-        url_re = re.compile(r'https?://script\.google\.com/macros[^\s\"\']+')
-        for c in candidates:
-            try:
-                if os.path.exists(c):
-                    with open(c, 'r', encoding='utf-8') as f:
-                        txt = f.read()
-                    m = url_re.search(txt)
-                    if m:
-                        return m.group(0)
-            except Exception:
-                continue
-        return ""
-
-
-    def post_apps_script(payload, timeout=30):
-        """Post JSON to APPS_SCRIPT_URL with retries and diagnostics.
-
-        Returns: dict (json) on success. Raises Exception with details on failure.
-        """
-        if not APPS_SCRIPT_URL:
-            raise RuntimeError("Apps Script URL not configured or found.")
-
-        session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=(500, 502, 503, 504))
-        session.mount('https://', HTTPAdapter(max_retries=retries))
-
-        try:
-            resp = session.post(APPS_SCRIPT_URL, json=payload, timeout=timeout)
-            resp.raise_for_status()
-            try:
-                return resp.json()
-            except Exception:
-                raise RuntimeError(f"Respuesta no JSON ({resp.status_code}): {resp.text[:500]}")
-        except requests.exceptions.RequestException as e:
-            # include some diagnostics
-            raise RuntimeError(f"Error al comunicarse con Apps Script: {e}")
-
-
-    # --- Login / Register (Apps Script) ---
-    APPS_SCRIPT_URL = find_appscript_url()
-
-    if not st.session_state.get("logged_in", False):
-        st.title("Acceso al Planeador - IMM")
-        tab_login, tab_register = st.tabs(["🔑 Iniciar Sesión", "📝 Registrarme"])
-
-        with tab_login:
-            st.subheader("Ingreso para Docentes")
-            docente_id = st.text_input("Ingrese su ID de Docente:", type="password", key="login_id_input")
-            if st.button("Probar conexión Apps Script"):
-                if not APPS_SCRIPT_URL:
-                    st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
-                else:
-                    try:
-                        r = requests.get(APPS_SCRIPT_URL, timeout=20)
-                        st.success(f"Conexión OK — código {r.status_code}")
-                        st.text(r.text[:800])
-                    except Exception as e:
-                        st.error(f"Error al conectar: {e}")
-            if st.button("Probar POST (login) con este ID"):
-                if not APPS_SCRIPT_URL:
-                    st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
-                else:
-                    if not docente_id or not docente_id.strip():
-                        st.warning("Ingrese el ID a probar primero en el campo de texto.")
-                    else:
-                        with st.spinner("Enviando POST de prueba al Apps Script..."):
-                            try:
-                                payload = {"action": "login", "teacher_id": docente_id.strip()}
-                                resp = post_apps_script(payload, timeout=30)
-                                st.success("Respuesta recibida:")
-                                st.json(resp)
-                            except Exception as e:
-                                st.error(f"Error en POST de prueba: {e}")
-            if st.button("Ingresar"):
-                if not docente_id.strip():
-                    st.warning("Por favor, ingrese un ID válido.")
-                else:
-                    if not APPS_SCRIPT_URL:
-                        st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
-                    else:
-                        with st.spinner("Verificando acceso..."):
-                            try:
-                                payload = {"action": "login", "teacher_id": docente_id.strip()}
-                                data = post_apps_script(payload, timeout=30)
-                                if data.get("success"):
-                                    st.session_state.logged_in = True
-                                    st.session_state.docente_titulo = data.get("title", st.session_state.docente_titulo)
-                                    st.session_state.docente_nombre = data.get("name", st.session_state.docente_nombre)
-                                    # Safe rerun: prefer st.experimental_rerun if available, otherwise use query param trick
-                                    try:
-                                        rerun = getattr(st, 'experimental_rerun')
-                                        rerun()
-                                    except Exception:
-                                        try:
-                                            st.experimental_set_query_params(_reload=int(datetime.now().timestamp()))
-                                        except Exception:
-                                            try:
-                                                # Final fallback: force reload via injected JS
-                                                ts = int(datetime.now().timestamp())
-                                                js = f"<script>window.location.href=window.location.pathname + '?_login={ts}';</script>"
-                                                components.html(js)
-                                            except Exception:
-                                                pass
-                                    # stop current run to allow UI to refresh
-                                    st.stop()
-                                else:
-                                    st.error(data.get("message", "Error al iniciar sesión."))
-                            except Exception as e:
-                                st.error(f"Error de conexión con la base de datos: {e}")
-
-        with tab_register:
-            st.subheader("Registro de Solicitud de Acceso")
-            st.caption("Nota: Su solicitud será enviada para aprobación previa al administrador.")
-            with st.form("form_registro_docente"):
-                reg_id = st.text_input("ID de Docente:")
-                reg_title = st.selectbox("Título Profesional:", ["Dr.", "Dra.", "Mtro.", "Mtra.", "Lic.", "Prof.", "Pasante"], key="reg_title")
-                reg_name = st.text_input("Nombre Completo:")
-                btn_registro = st.form_submit_button("Registrar y Solicitar Aprobación")
-                if btn_registro:
-                    if not reg_id.strip() or not reg_name.strip():
-                        st.warning("Complete todos los campos.")
-                    else:
-                        if not APPS_SCRIPT_URL:
-                            st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
-                        else:
-                            with st.spinner("Enviando solicitud..."):
-                                try:
-                                    payload = {"action": "register", "teacher_id": reg_id.strip(), "title": reg_title, "name": reg_name.strip()}
-                                    data = post_apps_script(payload, timeout=30)
-                                    if data.get("success"):
-                                        st.success(data.get("message"))
-                                    else:
-                                        st.error(data.get("message", "Error en registro."))
-                                except Exception as e:
-                                    st.error(f"Error de conexión con el servidor: {e}")
-
-        st.stop()
+    # Login/AppsScript integration removed — app now shows planner directly
 
     def get_current_data():
         daily_sequence = []
