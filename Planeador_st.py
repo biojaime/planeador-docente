@@ -21,6 +21,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus.doctemplate import Indenter
 from docx import Document
+from docx.enum.section import WD_ORIENT
 from docx.shared import Inches
 
 # --- Configuration ---
@@ -64,30 +65,28 @@ def html_to_reportlab(html_text):
     """
     if not html_text:
         return ""
-    
-    # Remove <p> tags, replacing closing </p> with <br/>
-    text = html_text.replace("</p>", "<br/>").replace("<p>", "")
-    
-    # Bold - Handle <strong>, <b>, and span with font-weight: bold
+
+    text = str(html_text)
+    text = text.replace('<br>', '<br/>').replace('<br />', '<br/>')
+    text = text.replace('</p>', '<br/><br/>').replace('<p>', '')
+
     text = re.sub(r'<span[^>]*style="[^"]*font-weight:\s*bold[^"]*"[^>]*>(.*?)</span>', r'<b>\1</b>', text, flags=re.IGNORECASE)
-    text = text.replace("<strong>", "<b>").replace("</strong>", "</b>")
-    
-    # Italic - Handle <em>, <i>, and span with font-style: italic
+    text = text.replace('<strong>', '<b>').replace('</strong>', '</b>')
+    text = re.sub(r'<span[^>]*>', '', text)
+    text = text.replace('</span>', '')
+
     text = re.sub(r'<span[^>]*style="[^"]*font-style:\s*italic[^"]*"[^>]*>(.*?)</span>', r'<i>\1</i>', text, flags=re.IGNORECASE)
-    text = text.replace("<em>", "<i>").replace("</em>", "</i>")
-    
-    # Underline
-    text = text.replace("<u>", "<u>").replace("</u>", "</u>")
-    
-    # Keep list markers; actual conversion to flowables handled later
-    text = text.replace("<ul>", "<ul>").replace("</ul>", "</ul>")
-    text = text.replace("<ol>", "<ol>").replace("</ol>", "</ol>")
-    text = text.replace("<li>", "<li>").replace("</li>", "</li>")
-    
-    # Clean up initial <br/> if any
-    if text.startswith("<br/>"):
+    text = text.replace('<em>', '<i>').replace('</em>', '</i>')
+
+    text = text.replace('<u>', '<u>').replace('</u>', '</u>')
+
+    # Convert list items into bullet lines for paragraphs
+    text = re.sub(r'<li>(.*?)</li>', r'• \1<br/>', text, flags=re.DOTALL)
+    text = text.replace('<ul>', '').replace('</ul>', '').replace('<ol>', '').replace('</ol>', '')
+
+    if text.startswith('<br/>'):
         text = text[5:]
-            
+
     return text
 
 
@@ -99,11 +98,11 @@ def html_to_flowables(html_text, styles, bullet_indent=12):
     if not html_text:
         return []
     s = str(html_text)
-    # Normalize newlines
+    s = s.replace('<br>', '<br/>').replace('<br />', '<br/>')
+    s = s.replace('</p>', '<br/><br/>').replace('<p>', '')
     s = s.replace('\r', '')
 
     flowables = []
-    # Find list blocks and plain blocks
     tokens = re.split(r'(<ul>|</ul>|<ol>|</ol>)', s)
     i = 0
     while i < len(tokens):
@@ -127,7 +126,6 @@ def html_to_flowables(html_text, styles, bullet_indent=12):
         else:
             if tok and tok.strip():
                 txt = html_to_reportlab(tok)
-                # split into paragraphs by double <br/>
                 for seg in re.split(r'(?:<br\s*/?>){2,}', txt):
                     seg = seg.strip()
                     if not seg:
@@ -156,7 +154,106 @@ def _embed_image_to_pdf(path, content_list, page_width):
             content_list.append(Paragraph(f"<i>[Error al cargar imagen: {os.path.basename(path)}]</i>", getSampleStyleSheet()['Italic']))
 
 
-def flatten_image(src_path, force_recreate=False):
+def cleanup_temp_rubric_files():
+    active_paths = set()
+    active_paths.update(st.session_state.get('abpj_rubrica_paths', []))
+    for day in st.session_state.get('daily_plan_data', {}).values():
+        active_paths.update(day.get('rubrica_paths', []))
+
+    for filename in os.listdir(os.getcwd()):
+        if filename.startswith('temp_rubric_'):
+            full_path = os.path.abspath(filename)
+            if full_path not in active_paths:
+                try:
+                    os.remove(full_path)
+                except Exception:
+                    pass
+
+
+def html_to_plain_text(html_text):
+    if not html_text:
+        return ''
+    text = str(html_text)
+    text = text.replace('<br>', '\n').replace('<br/>', '\n').replace('<br />', '\n')
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()
+
+
+def fill_docx_cell_from_html(cell, html_text):
+    content = str(html_text or '')
+    if not content.strip():
+        return
+
+    content = content.replace('<br>', '<br/>').replace('<br />', '<br/>')
+    tokens = re.split(r'(<\/?[^>]+>)', content)
+
+    paragraph = cell.paragraphs[0]
+    paragraph.text = ''
+    bold = italic = underline = False
+    list_style = None
+
+    for token in tokens:
+        if not token:
+            continue
+        if token.lower() == '<p>':
+            if paragraph.text or paragraph.runs:
+                paragraph = cell.add_paragraph()
+            continue
+        if token.lower() == '</p>':
+            paragraph = cell.add_paragraph(style=list_style)
+            continue
+        if token.lower() == '<ul>':
+            list_style = 'List Bullet'
+            continue
+        if token.lower() == '</ul>':
+            list_style = None
+            paragraph = cell.add_paragraph()
+            continue
+        if token.lower() == '<ol>':
+            list_style = 'List Number'
+            continue
+        if token.lower() == '</ol>':
+            list_style = None
+            paragraph = cell.add_paragraph()
+            continue
+        if token.lower() == '<li>':
+            paragraph = cell.add_paragraph(style=list_style or 'List Bullet')
+            continue
+        if token.lower() == '</li>':
+            paragraph = cell.add_paragraph(style=list_style)
+            continue
+        if token.lower() in ('<strong>', '<b>'):
+            bold = True
+            continue
+        if token.lower() in ('</strong>', '</b>'):
+            bold = False
+            continue
+        if token.lower() in ('<em>', '<i>'):
+            italic = True
+            continue
+        if token.lower() in ('</em>', '</i>'):
+            italic = False
+            continue
+        if token.lower() == '<u>':
+            underline = True
+            continue
+        if token.lower() == '</u>':
+            underline = False
+            continue
+        if token.lower() == '<br/>' or token.lower() == '<br />':
+            paragraph.add_run().add_break()
+            continue
+
+        run = paragraph.add_run(token)
+        run.bold = bold
+        run.italic = italic
+        run.underline = underline
+
+
+def set_docx_landscape(doc):
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width, section.page_height = section.page_height, section.page_width
     """If image has alpha/transparency, flatten it on white background and return a path to a non-alpha image.
     Caches the flattened image next to the original with suffix `_flat.jpg` to avoid repeating work.
     """
@@ -612,6 +709,7 @@ with st.sidebar:
             st.warning(f"No se pudo restaurar autosave: {e}")
 
     restore_autosave()
+    cleanup_temp_rubric_files()
 
 
     # Login/AppsScript integration removed — app now shows planner directly
@@ -856,6 +954,21 @@ with tab4:
             
             if st.session_state.get("abpj_rubrica_paths"):
                 st.caption(f"Rúbricas actuales: {', '.join([os.path.basename(x) for x in st.session_state.abpj_rubrica_paths])}")
+                for idx, path in enumerate(st.session_state.abpj_rubrica_paths.copy()):
+                    if os.path.exists(path):
+                        col_a, col_b = st.columns([4, 1])
+                        with col_a:
+                            st.image(path, width=120, caption=os.path.basename(path))
+                        with col_b:
+                            if st.button(f"Eliminar {os.path.basename(path)}", key=f"del_abpj_rubrica_{idx}"):
+                                st.session_state.abpj_rubrica_paths.remove(path)
+                                try:
+                                    os.remove(path)
+                                except Exception:
+                                    pass
+                                st.experimental_rerun()
+                    else:
+                        st.write(f"Ruta no encontrada: {path}")
 
     elif st.session_state.plan_metodologia != "Seleccione metodología":
         st.markdown(f"### Planeación Diaria ({st.session_state.plan_metodologia})")
@@ -911,6 +1024,22 @@ with tab4:
                                 lst.append(os.path.abspath(t_path))
                             day_data["rubrica_paths"] = lst
                             st.success("Imágenes cargadas")
+                        if day_data.get("rubrica_paths"):
+                            for idx, path in enumerate(day_data["rubrica_paths"].copy()):
+                                if os.path.exists(path):
+                                    col_a, col_b = st.columns([4, 1])
+                                    with col_a:
+                                        st.image(path, width=120, caption=os.path.basename(path))
+                                    with col_b:
+                                        if st.button(f"Eliminar {os.path.basename(path)}", key=f"del_day_rubrica_{key_base}_{idx}"):
+                                            day_data["rubrica_paths"].remove(path)
+                                            try:
+                                                os.remove(path)
+                                            except Exception:
+                                                pass
+                                            st.experimental_rerun()
+                                else:
+                                    st.write(f"Ruta no encontrada: {path}")
 
 # --- AI Prompt Generation ---
 st.markdown("---")
@@ -994,6 +1123,9 @@ def generate_pdf_bytes():
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), topMargin=0.5*inch, bottomMargin=0.5*inch, leftMargin=0.5*inch, rightMargin=0.5*inch)
     elements = []
     styles = getSampleStyleSheet()
+    body_style = ParagraphStyle('Body', parent=styles['Normal'], spaceAfter=6, leading=14)
+    PB = lambda x: Paragraph(f"<b>{x}</b>", body_style)
+    P = lambda x: Paragraph(html_to_reportlab(str(x)), body_style)
     
     ruta_logo_imm = _get_full_path("LOGO imm.png")
     ruta_logo_sep = _get_full_path("logo_sep.png")
@@ -1031,9 +1163,7 @@ def generate_pdf_bytes():
     d = get_current_data()
     p = d['planeacion']
     
-    PB = lambda x: Paragraph(f"<b>{x}</b>", styles['Normal'])
-    P = lambda x: Paragraph(html_to_reportlab(str(x)), styles['Normal'])
-    
+    # PB and P are now defined above with body_style for consistent paragraph spacing
     grupos_str = ", ".join(d['curso']['grupos'])
     docente_name = f"{d['docente']['titulo']} {d['docente']['nombre']}"
     dias_str = ", ".join(p['dias_planeados'])
@@ -1213,6 +1343,7 @@ def generate_pdf_bytes():
 def generate_docx_bytes():
     d = get_current_data()
     doc = Document()
+    set_docx_landscape(doc)
     doc.add_heading('Planeación Docente', level=1)
     curso = d['curso']
     docente = d['docente']
@@ -1223,33 +1354,46 @@ def generate_docx_bytes():
 
     p = d['planeacion']
     doc.add_heading('Contenido Pedagógico', level=2)
-    doc.add_paragraph(f"Metodología: {p.get('metodologia','')}")
-    doc.add_paragraph(f"Temporalidad: {date.fromisoformat(p.get('fecha_inicio','')).strftime('%d/%m/%Y')} - {date.fromisoformat(p.get('fecha_fin','')).strftime('%d/%m/%Y')}")
-    doc.add_paragraph(f"Días de clase: {', '.join(p.get('dias_planeados', []))}")
-    doc.add_paragraph(f"Ejes articuladores: {', '.join([e for e in [p.get('eje1'), p.get('eje2'), p.get('eje3')] if e and 'Seleccione' not in e])}")
-    doc.add_paragraph(f"Materias vinculadas: {', '.join([x for x in [p.get('disciplina1'), p.get('disciplina2'), p.get('disciplina3')] if x and 'Seleccione' not in x])}")
-    doc.add_paragraph('Problemática Contextual:')
-    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('problematica','')))
-    doc.add_paragraph('Objetivos:')
-    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('objetivos','')))
-    doc.add_paragraph('Perfil de Egreso:')
-    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('perfiles','')))
-    doc.add_paragraph('Producto Final:')
-    doc.add_paragraph(re.sub(r'<[^>]+>', '', p.get('producto','')))
+    table = doc.add_table(rows=0, cols=2)
+    table.style = 'Table Grid'
+    table.autofit = False
+    table.columns[0].width = Inches(2)
+    table.columns[1].width = Inches(8)
+
+    def add_row(label, content):
+        row = table.add_row().cells
+        row[0].paragraphs[0].add_run(label).bold = True
+        fill_docx_cell_from_html(row[1], content)
+
+    add_row('Metodología:', p.get('metodologia', ''))
+    add_row('Temporalidad:', f"{date.fromisoformat(p.get('fecha_inicio','')).strftime('%d/%m/%Y')} - {date.fromisoformat(p.get('fecha_fin','')).strftime('%d/%m/%Y')}")
+    add_row('Días de clase:', ', '.join(p.get('dias_planeados', [])))
+    add_row('Ejes articuladores:', ', '.join([e for e in [p.get('eje1'), p.get('eje2'), p.get('eje3')] if e and 'Seleccione' not in e]))
+    add_row('Materias vinculadas:', ', '.join([x for x in [p.get('disciplina1'), p.get('disciplina2'), p.get('disciplina3')] if x and 'Seleccione' not in x]))
+    add_row('Problemática Contextual:', p.get('problematica',''))
+    add_row('Objetivos:', p.get('objetivos',''))
+    add_row('Perfil de Egreso:', p.get('perfiles',''))
+    add_row('Producto Final:', p.get('producto',''))
 
     pdas = d['planeacion'].get('pda_entries') or []
     if pdas:
         doc.add_heading('PDA(s)', level=3)
         for idx, pd in enumerate(pdas):
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', pd), style='List Bullet')
+            fill_docx_cell_from_html(doc.add_paragraph(style='List Bullet')._p, pd)
 
     if 'ABPj' in p.get('metodologia',''):
         doc.add_heading('Secuencia Didáctica ABPj', level=2)
         abpj = p.get('secuencia_abpj', {})
+        abpj_table = doc.add_table(rows=0, cols=2)
+        abpj_table.style = 'Table Grid'
+        abpj_table.autofit = False
+        abpj_table.columns[0].width = Inches(2)
+        abpj_table.columns[1].width = Inches(8)
         for label in ['presentacion', 'recoleccion', 'formulacion', 'organizacion', 'experiencia', 'resultados', 'materiales', 'evaluacion']:
             label_text = label.capitalize()
-            doc.add_heading(label_text, level=3)
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', abpj.get(label, '')))
+            row = abpj_table.add_row().cells
+            row[0].paragraphs[0].add_run(f"{label_text}:").bold = True
+            fill_docx_cell_from_html(row[1], abpj.get(label, ''))
             if label == 'evaluacion':
                 for img_path in abpj.get('rubrica_paths', []):
                     try:
@@ -1260,16 +1404,21 @@ def generate_docx_bytes():
         doc.add_heading('Secuencia Didáctica', level=2)
         for day in d['planeacion'].get('secuencia_diaria', []):
             doc.add_heading(day.get('dia_nombre', ''), level=3)
-            doc.add_paragraph('Inicio:')
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('inicio','')))
-            doc.add_paragraph('Desarrollo:')
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('desarrollo','')))
-            doc.add_paragraph('Cierre:')
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('cierre','')))
-            doc.add_paragraph('Materiales:')
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('materiales','')))
-            doc.add_paragraph('Evaluación:')
-            doc.add_paragraph(re.sub(r'<[^>]+>', '', day.get('evaluacion','')))
+            day_table = doc.add_table(rows=0, cols=2)
+            day_table.style = 'Table Grid'
+            day_table.autofit = False
+            day_table.columns[0].width = Inches(2)
+            day_table.columns[1].width = Inches(8)
+            for label, content in [
+                ('Inicio:', day.get('inicio','')),
+                ('Desarrollo:', day.get('desarrollo','')),
+                ('Cierre:', day.get('cierre','')),
+                ('Materiales:', day.get('materiales','')),
+                ('Evaluación:', day.get('evaluacion',''))
+            ]:
+                row = day_table.add_row().cells
+                row[0].paragraphs[0].add_run(label).bold = True
+                fill_docx_cell_from_html(row[1], content)
             for img_path in day.get('rubrica_paths', []):
                 try:
                     doc.add_picture(img_path, width=Inches(4))
