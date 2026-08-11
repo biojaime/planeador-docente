@@ -523,7 +523,15 @@ with st.sidebar:
                 st.session_state.last_loaded_file_id = file_id
                 st.session_state.quill_key_suffix += 1 # Force Quill refresh
                 st.success("Planeación cargada correctamente.")
-                st.rerun()
+                try:
+                    rerun_fn = getattr(st, 'rerun')
+                    rerun_fn()
+                except Exception:
+                    try:
+                        st.experimental_set_query_params(_reload=int(datetime.now().timestamp()))
+                    except Exception:
+                        pass
+                st.stop()
             except Exception as e:
                 st.error(f"Error al cargar: {e}")
 
@@ -667,6 +675,21 @@ with st.sidebar:
                         st.text(r.text[:800])
                     except Exception as e:
                         st.error(f"Error al conectar: {e}")
+            if st.button("Probar POST (login) con este ID"):
+                if not APPS_SCRIPT_URL:
+                    st.error("No se encontró la URL de Apps Script. Verifique Appscript.txt.")
+                else:
+                    if not docente_id or not docente_id.strip():
+                        st.warning("Ingrese el ID a probar primero en el campo de texto.")
+                    else:
+                        with st.spinner("Enviando POST de prueba al Apps Script..."):
+                            try:
+                                payload = {"action": "login", "teacher_id": docente_id.strip()}
+                                resp = post_apps_script(payload, timeout=30)
+                                st.success("Respuesta recibida:")
+                                st.json(resp)
+                            except Exception as e:
+                                st.error(f"Error en POST de prueba: {e}")
             if st.button("Ingresar"):
                 if not docente_id.strip():
                     st.warning("Por favor, ingrese un ID válido.")
@@ -682,7 +705,17 @@ with st.sidebar:
                                     st.session_state.logged_in = True
                                     st.session_state.docente_titulo = data.get("title", st.session_state.docente_titulo)
                                     st.session_state.docente_nombre = data.get("name", st.session_state.docente_nombre)
-                                    st.experimental_rerun()
+                                    # Safe rerun: prefer st.experimental_rerun if available, otherwise use query param trick
+                                    try:
+                                        rerun = getattr(st, 'experimental_rerun')
+                                        rerun()
+                                    except Exception:
+                                        try:
+                                            st.experimental_set_query_params(_reload=int(datetime.now().timestamp()))
+                                        except Exception:
+                                            pass
+                                    # stop current run to allow UI to refresh
+                                    st.stop()
                                 else:
                                     st.error(data.get("message", "Error al iniciar sesión."))
                             except Exception as e:
