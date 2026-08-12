@@ -10,6 +10,8 @@ from streamlit_quill import st_quill
 import streamlit.components.v1 as components
 from PIL import Image
 import hashlib
+import tempfile
+import uuid
 # removed requests-based login integration per user request
 
 # --- ReportLab Imports ---
@@ -534,8 +536,32 @@ def _compute_data_hash(data_obj):
         return None
 
 
+def get_autosave_file_path():
+    """
+    Returns a unique session-specific path in the system temp directory (tempfile.gettempdir())
+    for the current user session to prevent cross-user data leaks/overwrites.
+    """
+    if "_session_autosave_filename" not in st.session_state:
+        sess_id = None
+        try:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+            ctx = get_script_run_ctx()
+            if ctx is not None and getattr(ctx, "session_id", None):
+                sess_id = ctx.session_id
+        except Exception:
+            pass
+
+        if not sess_id:
+            sess_id = str(uuid.uuid4())
+
+        safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', str(sess_id))
+        st.session_state["_session_autosave_filename"] = f"planeacion_autosave_{safe_id}.json"
+
+    return os.path.join(tempfile.gettempdir(), st.session_state["_session_autosave_filename"])
+
+
 def autosave_current_data():
-    """Save the current planning data to a local autosave JSON when it changes."""
+    """Save the current planning data to a session-specific autosave JSON when it changes."""
     try:
         if not st.session_state.get("autosave_enabled", True):
             return
@@ -546,7 +572,7 @@ def autosave_current_data():
             return
 
         if st.session_state.get("_autosave_hash") != h:
-            out_path = os.path.abspath("planeacion_autosave.json")
+            out_path = get_autosave_file_path()
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
             st.session_state["_autosave_hash"] = h
@@ -720,7 +746,7 @@ with st.sidebar:
                 return
             if not st.session_state.get("autosave_enabled", True):
                 return
-            autosave_path = os.path.abspath("planeacion_autosave.json")
+            autosave_path = get_autosave_file_path()
             if not os.path.exists(autosave_path):
                 return
             with open(autosave_path, "r", encoding="utf-8") as f:
