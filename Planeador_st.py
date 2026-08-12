@@ -536,28 +536,42 @@ def _compute_data_hash(data_obj):
         return None
 
 
+def get_client_id():
+    """
+    Get or create a unique client_id for the user's browser session.
+    Stored in URL query parameters and browser localStorage so that page refreshes (F5)
+    or tab reopens preserve the client's autosave progress while keeping different users completely isolated.
+    """
+    if "client_id" in st.session_state and st.session_state["client_id"]:
+        return st.session_state["client_id"]
+
+    try:
+        q_id = st.query_params.get("client_id")
+        if q_id and isinstance(q_id, str) and q_id.strip():
+            safe_id = re.sub(r'[^a-zA-Z0-9_-]', '', q_id.strip())
+            if safe_id:
+                st.session_state["client_id"] = safe_id
+                return safe_id
+    except Exception:
+        pass
+
+    new_id = f"c_{uuid.uuid4().hex[:12]}"
+    st.session_state["client_id"] = new_id
+    try:
+        st.query_params["client_id"] = new_id
+    except Exception:
+        pass
+    return new_id
+
+
 def get_autosave_file_path():
     """
-    Returns a unique session-specific path in the system temp directory (tempfile.gettempdir())
-    for the current user session to prevent cross-user data leaks/overwrites.
+    Returns a unique client-specific path in the system temp directory (tempfile.gettempdir()).
+    Isolates multi-user sessions while allowing page refreshes (F5) to restore progress.
     """
-    if "_session_autosave_filename" not in st.session_state:
-        sess_id = None
-        try:
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-            ctx = get_script_run_ctx()
-            if ctx is not None and getattr(ctx, "session_id", None):
-                sess_id = ctx.session_id
-        except Exception:
-            pass
-
-        if not sess_id:
-            sess_id = str(uuid.uuid4())
-
-        safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', str(sess_id))
-        st.session_state["_session_autosave_filename"] = f"planeacion_autosave_{safe_id}.json"
-
-    return os.path.join(tempfile.gettempdir(), st.session_state["_session_autosave_filename"])
+    cid = get_client_id()
+    filename = f"planeacion_autosave_{cid}.json"
+    return os.path.join(tempfile.gettempdir(), filename)
 
 
 def autosave_current_data():
@@ -576,8 +590,6 @@ def autosave_current_data():
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
             st.session_state["_autosave_hash"] = h
-            # Give a subtle indication (non-blocking)
-            st.experimental_set_query_params(_autosave=int(datetime.now().timestamp()))
     except Exception:
         pass
 
@@ -656,10 +668,70 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# Sync client_id with browser localStorage so page refreshes and re-opened tabs retain state
+cid_val = get_client_id()
+components.html(f"""
+<script>
+    try {{
+        const cid = "{cid_val}";
+        if (window.parent && window.parent.localStorage) {{
+            const urlParams = new URLSearchParams(window.parent.location.search);
+            const currentCid = urlParams.get('client_id');
+            if (!currentCid) {{
+                const storedCid = window.parent.localStorage.getItem('planeador_client_id');
+                if (storedCid) {{
+                    urlParams.set('client_id', storedCid);
+                    window.parent.location.search = urlParams.toString();
+                }} else {{
+                    window.parent.localStorage.setItem('planeador_client_id', cid);
+                }}
+            }} else {{
+                window.parent.localStorage.setItem('planeador_client_id', currentCid);
+            }}
+        }}
+    }} catch(e) {{}}
+</script>
+""", height=0)
+
 # --- Sidebar Actions ---
 with st.sidebar:
     st.header("Acciones")
     st.checkbox("Autoguardar localmente", value=True, key="autosave_enabled")
+
+    if st.button("➕ Nueva Planeación"):
+        try:
+            autosave_path = get_autosave_file_path()
+            if os.path.exists(autosave_path):
+                os.remove(autosave_path)
+        except Exception:
+            pass
+        new_cid = f"c_{uuid.uuid4().hex[:12]}"
+        st.session_state["client_id"] = new_cid
+        try:
+            st.query_params["client_id"] = new_cid
+        except Exception:
+            pass
+        for key in list(st.session_state.keys()):
+            if key not in ("client_id", "autosave_enabled"):
+                del st.session_state[key]
+        init_session_state()
+        st.session_state.quill_key_suffix += 1
+        components.html(f"""
+        <script>
+            try {{
+                if (window.parent && window.parent.localStorage) {{
+                    window.parent.localStorage.setItem('planeador_client_id', '{new_cid}');
+                    const urlParams = new URLSearchParams(window.parent.location.search);
+                    urlParams.set('client_id', '{new_cid}');
+                    window.parent.location.search = urlParams.toString();
+                }}
+            }} catch(e) {{}}
+        </script>
+        """, height=0)
+        try:
+            st.rerun()
+        except Exception:
+            pass
     
     uploaded_file = st.file_uploader("Cargar Planeación (JSON)", type="json")
     
