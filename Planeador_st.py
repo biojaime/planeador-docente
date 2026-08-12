@@ -23,7 +23,9 @@ from reportlab.lib import colors
 from reportlab.platypus.doctemplate import Indenter
 from docx import Document
 from docx.enum.section import WD_ORIENT
-from docx.shared import Inches
+from docx.shared import Inches, Pt, Emu
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 # --- Configuration ---
 st.set_page_config(page_title="Planeador Docente IMM", page_icon="📝", layout="wide")
@@ -62,77 +64,151 @@ def get_image_base64(path):
 
 def html_to_reportlab(html_text):
     """
-    Convert Quill HTML to ReportLab XML tags.
+    Convert Quill HTML to ReportLab XML tags for use inside a Paragraph.
+    Handles <b>, <i>, <u>, <strong>, <em>, <span style=bold/italic>, <br/>, <p>.
+    List items (<li>) are rendered as bullet prefix lines.
     """
     if not html_text:
         return ""
 
     text = str(html_text)
-    text = text.replace('<br>', '<br/>').replace('<br />', '<br/>')
-    text = text.replace('</p>', '<br/><br/>').replace('<p>', '')
 
-    text = re.sub(r'<span[^>]*style="[^"]*font-weight:\s*bold[^"]*"[^>]*>(.*?)</span>', r'<b>\1</b>', text, flags=re.IGNORECASE)
-    text = text.replace('<strong>', '<b>').replace('</strong>', '</b>')
-    text = re.sub(r'<span[^>]*>', '', text)
+    # Normalize self-closing br variants
+    text = text.replace('<br>', '<br/>').replace('<br />', '<br/>')
+
+    # Paragraph tags: opening <p ...> stripped, closing </p> becomes double break
+    text = re.sub(r'<p[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</p>', '<br/>', text, flags=re.IGNORECASE)
+
+    # Bold: <strong> and <span style="font-weight: bold">
+    text = re.sub(
+        r'<span[^>]*style="[^"]*font-weight\s*:\s*bold[^"]*"[^>]*>(.*?)</span>',
+        r'<b>\1</b>', text, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(r'<strong>(.*?)</strong>', r'<b>\1</b>', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Italic: <em> and <span style="font-style: italic">
+    text = re.sub(
+        r'<span[^>]*style="[^"]*font-style\s*:\s*italic[^"]*"[^>]*>(.*?)</span>',
+        r'<i>\1</i>', text, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(r'<em>(.*?)</em>', r'<i>\1</i>', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Strip remaining <span> tags (keep content)
+    text = re.sub(r'<span[^>]*>', '', text, flags=re.IGNORECASE)
     text = text.replace('</span>', '')
 
-    text = re.sub(r'<span[^>]*style="[^"]*font-style:\s*italic[^"]*"[^>]*>(.*?)</span>', r'<i>\1</i>', text, flags=re.IGNORECASE)
-    text = text.replace('<em>', '<i>').replace('</em>', '</i>')
+    # List items: convert to bullet prefix (for Paragraph context)
+    text = re.sub(r'<li[^>]*>(.*?)</li>', r'• \1<br/>', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'</?[uo]l[^>]*>', '', text, flags=re.IGNORECASE)
 
-    text = text.replace('<u>', '<u>').replace('</u>', '</u>')
+    # Strip any remaining unknown tags while preserving ReportLab-safe ones
+    # Keep <b>, </b>, <i>, </i>, <u>, </u>, <br/>
+    text = re.sub(r'<(?!/?(?:b|i|u|br/))[^>]+>', '', text, flags=re.IGNORECASE)
 
-    # Convert list items into bullet lines for paragraphs
-    text = re.sub(r'<li>(.*?)</li>', r'• \1<br/>', text, flags=re.DOTALL)
-    text = text.replace('<ul>', '').replace('</ul>', '').replace('<ol>', '').replace('</ol>', '')
-
-    if text.startswith('<br/>'):
-        text = text[5:]
+    # Clean up leading/trailing breaks
+    text = text.strip()
+    while text.startswith('<br/>'):
+        text = text[5:].strip()
+    while text.endswith('<br/>'):
+        text = text[:-5].strip()
 
     return text
 
 
-def html_to_flowables(html_text, styles, bullet_indent=12):
+def html_to_flowables(html_text, styles, bullet_indent=18):
     """
-    Convert basic Quill-like HTML into a list of ReportLab flowables (Paragraphs, ListFlowable).
-    Supports <b>, <i>, <u>, <br/>, <ul>, <ol>, <li>.
+    Convert Quill-like HTML into a list of ReportLab flowables.
+    Handles: <p>, <br/>, <b>, <i>, <u>, <strong>, <em>, <ul>, <ol>, <li>, <span style>.
+    Returns a list of Paragraph and ListFlowable objects preserving formatting.
     """
     if not html_text:
         return []
-    s = str(html_text)
+
+    s = str(html_text).replace('\r', '')
+    # Normalize br variants
     s = s.replace('<br>', '<br/>').replace('<br />', '<br/>')
-    s = s.replace('</p>', '<br/><br/>').replace('<p>', '')
-    s = s.replace('\r', '')
 
     flowables = []
-    tokens = re.split(r'(<ul>|</ul>|<ol>|</ol>)', s)
+    # Split on list boundaries so we can handle them separately
+    tokens = re.split(r'(<ul[^>]*>|</ul>|<ol[^>]*>|</ol>)', s, flags=re.IGNORECASE)
+
+    body_style = styles.get('Normal')
+    para_style = ParagraphStyle(
+        'FlowBody',
+        parent=body_style,
+        spaceAfter=4,
+        leading=14,
+    )
+    list_item_style = ParagraphStyle(
+        'FlowListItem',
+        parent=body_style,
+        leading=14,
+    )
+
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok in ('<ul>', '<ol>'):
-            list_type = tok
+        low = tok.lower().strip() if tok else ''
+
+        if re.match(r'<ul[^>]*>', low, re.IGNORECASE):
+            # Unordered list block — collect until </ul>
             i += 1
-            items = ''
-            while i < len(tokens) and tokens[i] not in ('</ul>', '</ol>'):
-                items += tokens[i]
+            inner = ''
+            while i < len(tokens) and not re.match(r'</ul>', tokens[i].strip(), re.IGNORECASE):
+                inner += tokens[i]
                 i += 1
-            li_items = re.findall(r'<li>(.*?)</li>', items, flags=re.DOTALL)
-            list_flow = []
+            li_items = re.findall(r'<li[^>]*>(.*?)</li>', inner, flags=re.IGNORECASE | re.DOTALL)
+            list_items = []
             for li in li_items:
                 txt = html_to_reportlab(li)
-                p = Paragraph(txt, styles['Normal'])
-                list_flow.append(ListItem(p))
-            lf = ListFlowable(list_flow, bulletType='bullet' if list_type == '<ul>' else '1', leftIndent=bullet_indent)
-            flowables.append(lf)
+                if txt:
+                    list_items.append(ListItem(Paragraph(txt, list_item_style), leftIndent=bullet_indent))
+            if list_items:
+                flowables.append(ListFlowable(list_items, bulletType='bullet', leftIndent=bullet_indent))
+            i += 1  # skip </ul>
+
+        elif re.match(r'<ol[^>]*>', low, re.IGNORECASE):
+            # Ordered list block — collect until </ol>
             i += 1
+            inner = ''
+            while i < len(tokens) and not re.match(r'</ol>', tokens[i].strip(), re.IGNORECASE):
+                inner += tokens[i]
+                i += 1
+            li_items = re.findall(r'<li[^>]*>(.*?)</li>', inner, flags=re.IGNORECASE | re.DOTALL)
+            list_items = []
+            for li in li_items:
+                txt = html_to_reportlab(li)
+                if txt:
+                    list_items.append(ListItem(Paragraph(txt, list_item_style), leftIndent=bullet_indent))
+            if list_items:
+                flowables.append(ListFlowable(list_items, bulletType='1', leftIndent=bullet_indent))
+            i += 1  # skip </ol>
+
         else:
+            # Regular HTML block — may contain <p> and <br/>
             if tok and tok.strip():
-                txt = html_to_reportlab(tok)
-                for seg in re.split(r'(?:<br\s*/?>){2,}', txt):
-                    seg = seg.strip()
+                # Split on <p> tags first to get paragraph blocks
+                # Replace </p> with sentinel, then split
+                chunk = tok
+                chunk = re.sub(r'<p[^>]*>', '\x00P_OPEN\x00', chunk, flags=re.IGNORECASE)
+                chunk = re.sub(r'</p>', '\x00P_CLOSE\x00', chunk, flags=re.IGNORECASE)
+                segments = chunk.split('\x00P_OPEN\x00')
+                for seg in segments:
+                    # Each seg may end with \x00P_CLOSE\x00
+                    seg = seg.replace('\x00P_CLOSE\x00', '').strip()
                     if not seg:
                         continue
-                    p = Paragraph(seg, styles['Normal'])
-                    flowables.append(p)
+                    # Now split on double (or more) <br/> to get sub-paragraphs
+                    sub_parts = re.split(r'(?:<br\s*/>\s*){2,}', seg)
+                    for part in sub_parts:
+                        # Single <br/> becomes newline within paragraph
+                        part = part.strip()
+                        if not part:
+                            continue
+                        txt = html_to_reportlab(part)
+                        if txt:
+                            flowables.append(Paragraph(txt, para_style))
             i += 1
 
     return flowables
@@ -1093,37 +1169,13 @@ if st.button("✨ Generar Prompt IA"):
 
     prompt += "\nEn la secuencia didáctica, incluye para cada actividad/fase los **Materiales y Recursos** necesarios, así como una propuesta de **Evaluación** (sugiere Lista de Cotejo o Rúbrica si es necesario)."
 
+    # If bilingual option is active, append instruction within the single prompt
+    if st.session_state.get("curso_bilingue"):
+        materia_bilingue = d['curso']['materia']
+        prompt += f"\n\n**INSTRUCCIÓN BILINGÜE:** Genera la planeación didáctica completamente en inglés para la materia de {materia_bilingue}. Todos los títulos, descripciones, actividades y contenidos deben estar escritos en inglés."
+
     st.code(prompt, language="text")
     st.info("Copia el texto de arriba y pégalo en tu IA favorita (ChatGPT, Gemini, DeepSeek).")
-    # If bilingual option is active, generate an English prompt as well
-    if st.session_state.get("curso_bilingue"):
-        def translate_prompt_to_english(sp):
-            # Lightweight, rule-based transformation of headings and fixed phrases
-            tr = sp
-            replacements = {
-                "Actúa como un docente experto de secundaria en México (SEP, Nueva Escuela Mexicana).": "Act as an experienced secondary school teacher in Mexico (SEP, New Mexican School).",
-                "Genera una planeación didáctica": "Generate a didactic lesson plan",
-                "Grado":"Grade",
-                "Campo Formativo":"Field",
-                "Metodología":"Methodology",
-                "Temporalidad":"Duration",
-                "Días de clase":"Class days",
-                "Problemática Contextual":"Contextual problem",
-                "PDA":"PDA",
-                "Objetivos":"Objectives",
-                "Perfil de Egreso":"Graduate profile",
-                "Producto Final":"Final product",
-                "Secuencia didáctica":"Didactic sequence",
-                "Inicio":"Start",
-                "Desarrollo":"Development",
-                "Cierre":"Closure",
-            }
-            for k, v in replacements.items():
-                tr = tr.replace(k, v)
-            return tr
-
-        en_prompt = translate_prompt_to_english(prompt)
-        st.code(en_prompt, language="text")
 
 # --- PDF Generation ---
 def generate_pdf_bytes():
@@ -1350,10 +1402,81 @@ def generate_pdf_bytes():
     return buffer
 
 
+def _add_docx_header_logos(doc):
+    """Add institutional logos to the header of a Word document."""
+    section = doc.sections[0]
+    header = section.header
+    # Clear any default paragraph text
+    for para in header.paragraphs:
+        para.text = ''
+
+    # We build a table inside the header: [IMM logo] [center space] [SEP logo]
+    header_table = header.add_table(rows=1, cols=3, width=Emu(int((
+        section.page_width - section.left_margin - section.right_margin
+    ))))
+    header_table.style = 'Table Grid'
+    # Remove borders from header table
+    tbl = header_table._tbl
+    tblPr = tbl.find(qn('w:tblPr'))
+    if tblPr is None:
+        tblPr = OxmlElement('w:tblPr')
+        tbl.insert(0, tblPr)
+    tblBorders = OxmlElement('w:tblBorders')
+    for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+        border = OxmlElement(f'w:{border_name}')
+        border.set(qn('w:val'), 'none')
+        tblBorders.append(border)
+    tblPr.append(tblBorders)
+
+    cells = header_table.rows[0].cells
+
+    # Left cell: IMM logo
+    ruta_logo_imm = _get_full_path("LOGO imm.png")
+    if os.path.exists(ruta_logo_imm):
+        try:
+            run_imm = cells[0].paragraphs[0].add_run()
+            run_imm.add_picture(ruta_logo_imm, width=Inches(1.2))
+        except Exception:
+            cells[0].paragraphs[0].text = 'IMM'
+    else:
+        cells[0].paragraphs[0].text = 'IMM'
+
+    # Center cell: institution name
+    center_para = cells[1].paragraphs[0]
+    center_para.alignment = 1  # CENTER
+    run_c = center_para.add_run('Instituto Mexicano Madero')
+    run_c.bold = True
+
+    # Right cell: SEP logo
+    ruta_logo_sep = _get_full_path("logo_sep.png")
+    if os.path.exists(ruta_logo_sep):
+        try:
+            right_para = cells[2].paragraphs[0]
+            right_para.alignment = 2  # RIGHT
+            run_sep = right_para.add_run()
+            run_sep.add_picture(ruta_logo_sep, width=Inches(1.5))
+        except Exception:
+            cells[2].paragraphs[0].text = 'SEP'
+    else:
+        cells[2].paragraphs[0].text = 'SEP'
+
+
 def generate_docx_bytes():
     d = get_current_data()
     doc = Document()
     set_docx_landscape(doc)
+
+    # Apply narrow margins (0.5 inch on all sides)
+    section = doc.sections[0]
+    narrow = Inches(0.5)
+    section.top_margin = narrow
+    section.bottom_margin = narrow
+    section.left_margin = narrow
+    section.right_margin = narrow
+
+    # Add logos to header
+    _add_docx_header_logos(doc)
+
     doc.add_heading('Planeación Docente', level=1)
     curso = d['curso']
     docente = d['docente']
