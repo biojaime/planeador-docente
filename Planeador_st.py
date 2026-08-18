@@ -12,6 +12,7 @@ from PIL import Image
 import hashlib
 import tempfile
 import uuid
+import sqlite3
 # removed requests-based login integration per user request
 
 # --- ReportLab Imports ---
@@ -470,17 +471,108 @@ def get_pdas_for_selection(materia, curso_grado):
             filtered.append(r)
     return filtered
 
+def safe_rerun():
+    """Trigger Streamlit rerun safely across versions."""
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            rerun_fn = getattr(st, "experimental_rerun", None)
+            if rerun_fn:
+                rerun_fn()
+        except Exception:
+            pass
+
+def process_uploaded_rubrics(uploaded_files, current_paths, key_prefix):
+    """Processes uploaded rubric files, preventing duplicate entries across reruns."""
+    if "processed_upload_hashes" not in st.session_state or not isinstance(st.session_state.processed_upload_hashes, set):
+        st.session_state.processed_upload_hashes = set()
+    if "path_hash_map" not in st.session_state or not isinstance(st.session_state.path_hash_map, dict):
+        st.session_state.path_hash_map = {}
+
+    if not uploaded_files:
+        return list(current_paths or [])
+
+    if not isinstance(uploaded_files, list):
+        uploaded_files = [uploaded_files]
+
+    updated_paths = list(current_paths or [])
+
+    for idx, uploaded in enumerate(uploaded_files):
+        try:
+            buf = uploaded.getbuffer()
+            file_hash = hashlib.sha256(buf).hexdigest()
+
+            if file_hash in st.session_state.processed_upload_hashes:
+                continue
+
+            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', uploaded.name)
+            temp_path = os.path.abspath(f"temp_rubric_{key_prefix}_{idx}_{safe_name}")
+            with open(temp_path, "wb") as f:
+                f.write(buf)
+
+            if temp_path not in updated_paths:
+                updated_paths.append(temp_path)
+
+            st.session_state.processed_upload_hashes.add(file_hash)
+            st.session_state.path_hash_map[temp_path] = file_hash
+        except Exception as e:
+            st.error(f"Error al procesar imagen {uploaded.name}: {e}")
+
+    return updated_paths
+
+def remove_rubric_image(image_path, paths_list):
+    """Safely removes a rubric image file from disk and session state without crashing."""
+    if image_path in paths_list:
+        paths_list.remove(image_path)
+
+    path_map = st.session_state.get("path_hash_map", {})
+    if image_path in path_map:
+        file_hash = path_map.pop(image_path)
+        hashes_set = st.session_state.get("processed_upload_hashes")
+        if isinstance(hashes_set, set):
+            hashes_set.discard(file_hash)
+
+    if os.path.exists(image_path):
+        try:
+            os.remove(image_path)
+        except Exception:
+            pass
+
+    safe_rerun()
+
+def get_current_pda_list():
+    """Returns a unified list of strings for all active PDAs (both official and custom)."""
+    entries = []
+    for pda_text in st.session_state.get("pda_official_selected", []):
+        if pda_text and str(pda_text).strip():
+            entries.append(str(pda_text).strip())
+
+    for custom_text in st.session_state.get("pda_custom_entries", []):
+        if custom_text and str(custom_text).strip():
+            entries.append(str(custom_text).strip())
+
+    return entries
+
 def get_current_pda():
-    if st.session_state.get("pda_custom_active", False):
-        return st.session_state.get("pda_custom", "")
-    else:
-        return st.session_state.get("pda_selected", "")
+    """Returns a unified string representation of all active PDAs."""
+    entries = get_current_pda_list()
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        return entries[0]
+    items = []
+    for e in entries:
+        clean = re.sub(r'<[^>]+>', '', str(e)).strip()
+        if clean:
+            items.append(f"• {clean}")
+    return "<br/>".join(items)
 
 # --- Initialization & State ---
 
 def init_session_state():
     defaults = {
-    "logged_in": False,
+        "logged_in": False,
         "docente_titulo": "Dr.",
         "docente_nombre": "",
         "curso_grado": "1ro",
@@ -504,6 +596,10 @@ def init_session_state():
         "pda_selected": "",
         "pda_custom": "",
         "pda_entries": [],
+        "pda_official_selected": [],
+        "pda_custom_entries": [],
+        "processed_upload_hashes": set(),
+        "path_hash_map": {},
         "text_objetivos": "",
         "text_perfiles": "",
         "text_producto": "",
@@ -536,46 +632,119 @@ def _compute_data_hash(data_obj):
         return None
 
 
-def get_client_id():
+# --- Database & Persistence Infrastructure (SQLite) ---
+
+def get_db_path():
     """
-    Get or create a unique client_id for the user's browser session.
-    Stored in URL query parameters and browser localStorage so that page refreshes (F5)
-    or tab reopens preserve the client's autosave progress while keeping different users completely isolated.
+    Returns path to SQLite database. Uses environment variable PLANEADOR_DB_PATH if set,
+    otherwise defaults to ./data/planeador.db relative to script directory.
     """
-    if "client_id" in st.session_state and st.session_state["client_id"]:
-        return st.session_state["client_id"]
+    env_path = os.environ.get("PLANEADOR_DB_PATH")
+    if env_path:
+        return env_path
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "data", "planeador.db")
+
+def init_db():
+    """Initializes SQLite database with WAL journal mode for high concurrency."""
+    db_file = get_db_path()
+    os.makedirs(os.path.dirname(os.path.abspath(db_file)), exist_ok=True)
+    try:
+        with sqlite3.connect(db_file, timeout=10) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS planeaciones (
+                    user_id TEXT PRIMARY KEY,
+                    docente_nombre TEXT,
+                    data_json TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        st.error(f"Error al inicializar la base de datos de planeaciones: {e}")
+
+def save_user_planeacion(user_id, data_obj):
+    """Saves user planning data to SQLite database."""
+    if not user_id:
+        return
+    init_db()
+    json_str = json.dumps(data_obj, ensure_ascii=False, indent=2, default=str)
+    docente_name = data_obj.get("docente", {}).get("nombre", "")
+    db_file = get_db_path()
+    try:
+        with sqlite3.connect(db_file, timeout=10) as conn:
+            conn.execute("""
+                INSERT INTO planeaciones (user_id, docente_nombre, data_json, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    docente_nombre=excluded.docente_nombre,
+                    data_json=excluded.data_json,
+                    updated_at=CURRENT_TIMESTAMP;
+            """, (user_id, docente_name, json_str))
+            conn.commit()
+    except Exception:
+        pass
+
+def load_user_planeacion(user_id):
+    """Loads user planning data from SQLite database."""
+    if not user_id:
+        return None
+    init_db()
+    db_file = get_db_path()
+    try:
+        with sqlite3.connect(db_file, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT data_json FROM planeaciones WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+def delete_user_planeacion(user_id):
+    """Deletes a user's autosave record from SQLite database."""
+    if not user_id:
+        return
+    init_db()
+    db_file = get_db_path()
+    try:
+        with sqlite3.connect(db_file, timeout=10) as conn:
+            conn.execute("DELETE FROM planeaciones WHERE user_id = ?", (user_id,))
+            conn.commit()
+    except Exception:
+        pass
+
+def get_user_id():
+    """
+    Get or create a stable user_id for the current session.
+    Checks query params first ('user', 'user_id', 'client_id'), then session state,
+    or auto-generates a clean unique key.
+    """
+    if st.session_state.get("user_id"):
+        return st.session_state["user_id"]
 
     try:
-        q_id = st.query_params.get("client_id")
-        if q_id and isinstance(q_id, str) and q_id.strip():
-            safe_id = re.sub(r'[^a-zA-Z0-9_-]', '', q_id.strip())
+        q_user = st.query_params.get("user") or st.query_params.get("user_id") or st.query_params.get("client_id")
+        if q_user and isinstance(q_user, str) and q_user.strip():
+            safe_id = re.sub(r'[^a-zA-Z0-9_-]', '', q_user.strip())
             if safe_id:
-                st.session_state["client_id"] = safe_id
+                st.session_state["user_id"] = safe_id
                 return safe_id
     except Exception:
         pass
 
-    new_id = f"c_{uuid.uuid4().hex[:12]}"
-    st.session_state["client_id"] = new_id
+    new_id = f"user_{uuid.uuid4().hex[:10]}"
+    st.session_state["user_id"] = new_id
     try:
-        st.query_params["client_id"] = new_id
+        st.query_params["user"] = new_id
     except Exception:
         pass
     return new_id
 
-
-def get_autosave_file_path():
-    """
-    Returns a unique client-specific path in the system temp directory (tempfile.gettempdir()).
-    Isolates multi-user sessions while allowing page refreshes (F5) to restore progress.
-    """
-    cid = get_client_id()
-    filename = f"planeacion_autosave_{cid}.json"
-    return os.path.join(tempfile.gettempdir(), filename)
-
-
 def autosave_current_data():
-    """Save the current planning data to a session-specific autosave JSON when it changes."""
+    """Save the current planning data to SQLite database when changes are detected."""
     try:
         if not st.session_state.get("autosave_enabled", True):
             return
@@ -586,9 +755,8 @@ def autosave_current_data():
             return
 
         if st.session_state.get("_autosave_hash") != h:
-            out_path = get_autosave_file_path()
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            user_id = get_user_id()
+            save_user_planeacion(user_id, data)
             st.session_state["_autosave_hash"] = h
     except Exception:
         pass
@@ -668,66 +836,50 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Sync client_id with browser localStorage so page refreshes and re-opened tabs retain state
-cid_val = get_client_id()
-components.html(f"""
-<script>
-    try {{
-        const cid = "{cid_val}";
-        if (window.parent && window.parent.localStorage) {{
-            const urlParams = new URLSearchParams(window.parent.location.search);
-            const currentCid = urlParams.get('client_id');
-            if (!currentCid) {{
-                const storedCid = window.parent.localStorage.getItem('planeador_client_id');
-                if (storedCid) {{
-                    urlParams.set('client_id', storedCid);
-                    window.parent.location.search = urlParams.toString();
-                }} else {{
-                    window.parent.localStorage.setItem('planeador_client_id', cid);
-                }}
-            }} else {{
-                window.parent.localStorage.setItem('planeador_client_id', currentCid);
-            }}
-        }}
-    }} catch(e) {{}}
-</script>
-""", height=0)
-
 # --- Sidebar Actions ---
 with st.sidebar:
     st.header("Acciones")
-    st.checkbox("Autoguardar localmente", value=True, key="autosave_enabled")
+
+    # User ID / Session Control
+    current_uid = get_user_id()
+    new_user_input = st.text_input(
+        "🆔 Usuario / Clave de Sesión",
+        value=current_uid,
+        help="Introduce tu nombre de usuario o clave personal para guardar y recuperar tu planeación en cualquier momento o dispositivo."
+    )
+    clean_uid = re.sub(r'[^a-zA-Z0-9_-]', '', new_user_input.strip())
+    if clean_uid and clean_uid != current_uid:
+        st.session_state["user_id"] = clean_uid
+        try:
+            st.query_params["user"] = clean_uid
+        except Exception:
+            pass
+        st.session_state["_autosave_loaded"] = False
+        try:
+            st.rerun()
+        except Exception:
+            pass
+
+    st.caption(f"🟢 Sesión activa: **{current_uid}**")
+    st.checkbox("Autoguardar automáticamente", value=True, key="autosave_enabled")
 
     if st.button("➕ Nueva Planeación"):
         try:
-            autosave_path = get_autosave_file_path()
-            if os.path.exists(autosave_path):
-                os.remove(autosave_path)
+            delete_user_planeacion(get_user_id())
         except Exception:
             pass
-        new_cid = f"c_{uuid.uuid4().hex[:12]}"
-        st.session_state["client_id"] = new_cid
+        new_uid = f"user_{uuid.uuid4().hex[:10]}"
+        st.session_state["user_id"] = new_uid
         try:
-            st.query_params["client_id"] = new_cid
+            st.query_params["user"] = new_uid
         except Exception:
             pass
         for key in list(st.session_state.keys()):
-            if key not in ("client_id", "autosave_enabled"):
+            if key not in ("user_id", "autosave_enabled"):
                 del st.session_state[key]
         init_session_state()
         st.session_state.quill_key_suffix += 1
-        components.html(f"""
-        <script>
-            try {{
-                if (window.parent && window.parent.localStorage) {{
-                    window.parent.localStorage.setItem('planeador_client_id', '{new_cid}');
-                    const urlParams = new URLSearchParams(window.parent.location.search);
-                    urlParams.set('client_id', '{new_cid}');
-                    window.parent.location.search = urlParams.toString();
-                }}
-            }} catch(e) {{}}
-        </script>
-        """, height=0)
+        st.success("Nueva planeación iniciada.")
         try:
             st.rerun()
         except Exception:
@@ -771,9 +923,29 @@ with st.sidebar:
                 st.session_state.pda_custom_active = plan.get("pda_custom_active", False)
                 st.session_state.pda_selected = plan.get("pda_selected", "")
                 st.session_state.pda_custom = plan.get("pda_custom", "")
-                if "pda_custom_active" not in plan and "pda" in plan:
-                    st.session_state.pda_custom_active = True
-                    st.session_state.pda_custom = plan.get("pda", "")
+                st.session_state.pda_entries = plan.get("pda_entries", [])
+                
+                # Restore official vs custom PDAs with backward compatibility
+                off_sel = list(plan.get("pda_official_selected", []))
+                cust_list = list(plan.get("pda_custom_entries", []))
+                if not off_sel and not cust_list and plan.get("pda_entries"):
+                    pdas_list = get_pdas_for_selection(st.session_state.curso_materia, st.session_state.curso_grado)
+                    official_options = [p["pda"] for p in pdas_list] if pdas_list else []
+                    for entry in plan.get("pda_entries", []):
+                        txt = str(entry).strip()
+                        if official_options and txt in official_options:
+                            if txt not in off_sel: off_sel.append(txt)
+                        else:
+                            if txt not in cust_list: cust_list.append(txt)
+
+                if plan.get("pda_selected") and plan.get("pda_selected") not in off_sel:
+                    off_sel.append(plan.get("pda_selected"))
+                if plan.get("pda_custom") and plan.get("pda_custom") not in cust_list:
+                    cust_list.append(plan.get("pda_custom"))
+
+                st.session_state.pda_official_selected = off_sel
+                st.session_state.pda_custom_entries = cust_list
+
                 st.session_state.text_objetivos = plan.get("objetivos", "")
                 st.session_state.text_perfiles = plan.get("perfiles", "")
                 st.session_state.text_producto = plan.get("producto", "")
@@ -794,35 +966,22 @@ with st.sidebar:
                 st.session_state.last_loaded_file_id = file_id
                 st.session_state.quill_key_suffix += 1 # Force Quill refresh
                 st.success("Planeación cargada correctamente.")
-                try:
-                    rerun_fn = getattr(st, 'rerun')
-                    rerun_fn()
-                except Exception:
-                    try:
-                        st.experimental_set_query_params(_reload=int(datetime.now().timestamp()))
-                    except Exception:
-                        try:
-                            ts = int(datetime.now().timestamp())
-                            js = f"<script>window.location.href=window.location.pathname + '?_load={ts}';</script>"
-                            components.html(js)
-                        except Exception:
-                            pass
+                safe_rerun()
                 st.stop()
             except Exception as e:
                 st.error(f"Error al cargar: {e}")
 
-    # Attempt automatic restore from local autosave if available and not already loaded
+    # Attempt automatic restore from SQLite database if available and not already loaded
     def restore_autosave():
         try:
             if st.session_state.get("_autosave_loaded"):
                 return
             if not st.session_state.get("autosave_enabled", True):
                 return
-            autosave_path = get_autosave_file_path()
-            if not os.path.exists(autosave_path):
+            user_id = get_user_id()
+            data = load_user_planeacion(user_id)
+            if not data:
                 return
-            with open(autosave_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
 
             docente = data.get("docente", {})
             st.session_state.docente_titulo = docente.get("titulo", st.session_state.docente_titulo)
@@ -851,6 +1010,28 @@ with st.sidebar:
             st.session_state.pda_custom_active = plan.get("pda_custom_active", st.session_state.pda_custom_active)
             st.session_state.pda_selected = plan.get("pda_selected", st.session_state.pda_selected)
             st.session_state.pda_custom = plan.get("pda_custom", st.session_state.pda_custom)
+            st.session_state.pda_entries = plan.get("pda_entries", st.session_state.get("pda_entries", []))
+
+            # Restore official vs custom PDAs with backward compatibility
+            off_sel = list(plan.get("pda_official_selected", []))
+            cust_list = list(plan.get("pda_custom_entries", []))
+            if not off_sel and not cust_list and plan.get("pda_entries"):
+                pdas_list = get_pdas_for_selection(st.session_state.curso_materia, st.session_state.curso_grado)
+                official_options = [p["pda"] for p in pdas_list] if pdas_list else []
+                for entry in plan.get("pda_entries", []):
+                    txt = str(entry).strip()
+                    if official_options and txt in official_options:
+                        if txt not in off_sel: off_sel.append(txt)
+                    else:
+                        if txt not in cust_list: cust_list.append(txt)
+
+            if plan.get("pda_selected") and plan.get("pda_selected") not in off_sel:
+                off_sel.append(plan.get("pda_selected"))
+            if plan.get("pda_custom") and plan.get("pda_custom") not in cust_list:
+                cust_list.append(plan.get("pda_custom"))
+
+            st.session_state.pda_official_selected = off_sel
+            st.session_state.pda_custom_entries = cust_list
             st.session_state.text_objetivos = plan.get("objetivos", st.session_state.text_objetivos)
             st.session_state.text_perfiles = plan.get("perfiles", st.session_state.text_perfiles)
             st.session_state.text_producto = plan.get("producto", st.session_state.text_producto)
@@ -864,7 +1045,6 @@ with st.sidebar:
             st.session_state.abpj_resultados = abpj.get("resultados", st.session_state.abpj_resultados)
             st.session_state.abpj_materiales = abpj.get("materiales", st.session_state.abpj_materiales)
             st.session_state.abpj_evaluacion = abpj.get("evaluacion", st.session_state.abpj_evaluacion)
-            # Support both single-path legacy and new list format
             if abpj.get("rubrica_paths"):
                 st.session_state.abpj_rubrica_paths = abpj.get("rubrica_paths", st.session_state.abpj_rubrica_paths)
             else:
@@ -879,9 +1059,7 @@ with st.sidebar:
             st.session_state.last_loaded_file_id = "autosave"
             st.session_state.quill_key_suffix += 1
             st.session_state["_autosave_loaded"] = True
-            st.info("Autosave restaurado automáticamente.")
         except Exception as e:
-            # Non-fatal; show a subtle warning
             st.warning(f"No se pudo restaurar autosave: {e}")
 
     restore_autosave()
@@ -1044,53 +1222,54 @@ with tab3:
     ks = st.session_state.quill_key_suffix
     
     st.session_state.text_problematica = st_quill(value=st.session_state.text_problematica, placeholder="Problemática Contextual", toolbar=toolbar, key=f"quill_prob_{ks}")
-    st.markdown("**Proceso de Desarrollo de Aprendizaje (PDA)**")
-    st.checkbox(
-        "No hay un PDA que se adapte a mi clase (Redactar uno personalizado como codiseño)",
-        key="pda_custom_active"
-    )
     
-    if st.session_state.pda_custom_active:
-        # Allow multiple PDA entries
-        if not st.session_state.get("pda_entries"):
-            st.session_state.pda_entries = [st.session_state.get("pda_custom", "")]
-
-        new_entries = []
-        for idx, entry in enumerate(st.session_state.pda_entries):
-            val = st_quill(value=entry, placeholder=f"PDA {idx+1}", toolbar=toolbar, key=f"quill_pda_custom_{ks}_{idx}")
-            if st.button(f"Eliminar PDA {idx+1}", key=f"del_pda_{idx}"):
-                continue
-            new_entries.append(val)
-
-        if st.button("+ Agregar PDA"):
-            new_entries.append("")
-
-        st.session_state.pda_entries = new_entries
+    st.markdown("### Proceso de Desarrollo de Aprendizaje (PDA)")
+    pdas_list = get_pdas_for_selection(st.session_state.curso_materia, st.session_state.curso_grado)
+    official_options = [p["pda"] for p in pdas_list] if pdas_list else []
+    
+    st.markdown("#### 1. PDAs Oficiales (Plan Sintético)")
+    if official_options:
+        st.multiselect(
+            "Seleccione uno o varios PDAs oficiales:",
+            options=official_options,
+            key="pda_official_selected",
+            help="Puede seleccionar múltiples PDAs del Plan Sintético."
+        )
+        if st.session_state.get("pda_official_selected"):
+            with st.expander("Ver contenidos del Plan Sintético asociados", expanded=False):
+                for sel in st.session_state.pda_official_selected:
+                    rec = next((r for r in pdas_list if r["pda"] == sel), None)
+                    if rec:
+                        st.caption(f"• **PDA:** {sel}<br/>  **Contenido:** {rec['contenido']}", unsafe_allow_html=True)
     else:
-        pdas_list = get_pdas_for_selection(st.session_state.curso_materia, st.session_state.curso_grado)
-        if not pdas_list:
-            st.info("No se encontraron PDAs oficiales para esta materia y grado en el Plan Sintético. Puede redactar uno personalizado seleccionando la casilla de arriba.")
-            st.session_state.pda_selected = ""
-        else:
-            options = [p["pda"] for p in pdas_list]
-            
-            default_index = 0
-            if st.session_state.pda_selected in options:
-                default_index = options.index(st.session_state.pda_selected)
-                
-            st.selectbox(
-                "Seleccione el PDA oficial (Plan Sintético):",
-                options=options,
-                index=default_index,
-                key="pda_selected"
+        st.info("No se encontraron PDAs oficiales para esta materia y grado en el Plan Sintético.")
+    
+    st.markdown("#### 2. PDAs Personalizados (Codiseño)")
+    if "pda_custom_entries" not in st.session_state or not isinstance(st.session_state.pda_custom_entries, list):
+        st.session_state.pda_custom_entries = []
+
+    new_custom_entries = []
+    for idx, entry in enumerate(st.session_state.get("pda_custom_entries", [])):
+        c_pda1, c_pda2 = st.columns([5, 1])
+        with c_pda1:
+            val = st_quill(
+                value=entry,
+                placeholder=f"Redactar PDA personalizado {idx+1}",
+                toolbar=toolbar,
+                key=f"quill_pda_custom_{ks}_{idx}"
             )
-            
-            selected_record = pdas_list[options.index(st.session_state.pda_selected)] if st.session_state.pda_selected in options else None
-            if selected_record:
-                st.caption(f"**Contenido del Plan Sintético asociado:** {selected_record['contenido']}")
-                # ensure single selected PDA is present in entries
-                if not st.session_state.get("pda_entries"):
-                    st.session_state.pda_entries = [selected_record.get('pda', '')]
+        with c_pda2:
+            if st.button(f"🗑️ Eliminar", key=f"del_pda_custom_{idx}"):
+                continue
+        new_custom_entries.append(val)
+
+    if st.button("➕ Agregar PDA Personalizado (Codiseño)"):
+        new_custom_entries.append("")
+        st.session_state.pda_custom_entries = new_custom_entries
+        safe_rerun()
+
+    st.session_state.pda_custom_entries = new_custom_entries
+
     st.session_state.text_objetivos = st_quill(value=st.session_state.text_objetivos, placeholder="Objetivos", toolbar=toolbar, key=f"quill_obj_{ks}")
     st.session_state.text_perfiles = st_quill(value=st.session_state.text_perfiles, placeholder="Perfiles de Egreso", toolbar=toolbar, key=f"quill_perf_{ks}")
     st.session_state.text_producto = st_quill(value=st.session_state.text_producto, placeholder="Producto Final", toolbar=toolbar, key=f"quill_prod_{ks}")
@@ -1117,20 +1296,16 @@ with tab4:
             
             st.markdown("#### Evaluación")
             st.session_state.abpj_evaluacion = st_quill(value=st.session_state.abpj_evaluacion, placeholder="Evaluación", toolbar=toolbar_simple, key=f"q_abpj_eval_{ks}")
-            uploaded_rubric = st.file_uploader("Anexar Rúbrica (Imagen)", type=["png", "jpg", "jpeg"], key="abpj_rubric_uploader")
+            uploaded_rubric = st.file_uploader("Anexar Rúbrica (Imagen)", type=["png", "jpg", "jpeg"], key=f"abpj_rubric_uploader_{ks}")
             if uploaded_rubric:
-                temp_path = f"temp_rubric_abpj_{uploaded_rubric.name}"
-                with open(temp_path, "wb") as f:
-                    f.write(uploaded_rubric.getbuffer())
-                # support multiple rubric images
-                lst = st.session_state.get("abpj_rubrica_paths", [])
-                lst.append(os.path.abspath(temp_path))
-                st.session_state.abpj_rubrica_paths = lst
-                st.success(f"Rúbrica cargada: {uploaded_rubric.name}")
+                st.session_state.abpj_rubrica_paths = process_uploaded_rubrics(
+                    uploaded_rubric,
+                    st.session_state.get("abpj_rubrica_paths", []),
+                    "abpj"
+                )
             
             if st.session_state.get("abpj_rubrica_paths"):
                 st.caption(f"Rúbricas actuales: {', '.join([os.path.basename(x) for x in st.session_state.abpj_rubrica_paths])}")
-                removed_abpj = False
                 for idx, path in enumerate(st.session_state.abpj_rubrica_paths.copy()):
                     if os.path.exists(path):
                         col_a, col_b = st.columns([4, 1])
@@ -1138,16 +1313,9 @@ with tab4:
                             st.image(path, width=120, caption=os.path.basename(path))
                         with col_b:
                             if st.button(f"Eliminar {os.path.basename(path)}", key=f"del_abpj_rubrica_{idx}"):
-                                st.session_state.abpj_rubrica_paths.remove(path)
-                                try:
-                                    os.remove(path)
-                                except Exception:
-                                    pass
-                                removed_abpj = True
+                                remove_rubric_image(path, st.session_state.abpj_rubrica_paths)
                     else:
                         st.write(f"Ruta no encontrada: {path}")
-                if removed_abpj:
-                    st.experimental_rerun()
 
     elif st.session_state.plan_metodologia != "Seleccione metodología":
         st.markdown(f"### Planeación Diaria ({st.session_state.plan_metodologia})")
@@ -1193,18 +1361,15 @@ with tab4:
                     with c4: day_data["materiales"] = st_quill(value=day_data["materiales"], placeholder="Materiales", key=f"mat_{key_base}_{ks}", toolbar=toolbar_simple)
                     with c5: 
                         day_data["evaluacion"] = st_quill(value=day_data["evaluacion"], placeholder="Evaluación", key=f"eval_{key_base}_{ks}", toolbar=toolbar_simple)
-                        u_rubrics = st.file_uploader("Rúbrica (puede subir varias)", type=["png", "jpg"], key=f"up_{key_base}", accept_multiple_files=True)
+                        u_rubrics = st.file_uploader("Rúbrica (puede subir varias)", type=["png", "jpg", "jpeg"], key=f"up_{key_base}_{ks}", accept_multiple_files=True)
                         if u_rubrics:
-                            lst = day_data.get("rubrica_paths", [])
-                            for uploaded in u_rubrics:
-                                t_path = f"temp_rubric_{i}_{uploaded.name}"
-                                with open(t_path, "wb") as f:
-                                    f.write(uploaded.getbuffer())
-                                lst.append(os.path.abspath(t_path))
-                            day_data["rubrica_paths"] = lst
-                            st.success("Imágenes cargadas")
+                            day_data["rubrica_paths"] = process_uploaded_rubrics(
+                                u_rubrics,
+                                day_data.get("rubrica_paths", []),
+                                f"day_{i}"
+                            )
+
                         if day_data.get("rubrica_paths"):
-                            removed_day_rubric = False
                             for idx, path in enumerate(day_data["rubrica_paths"].copy()):
                                 if os.path.exists(path):
                                     col_a, col_b = st.columns([4, 1])
@@ -1212,16 +1377,9 @@ with tab4:
                                         st.image(path, width=120, caption=os.path.basename(path))
                                     with col_b:
                                         if st.button(f"Eliminar {os.path.basename(path)}", key=f"del_day_rubrica_{key_base}_{idx}"):
-                                            day_data["rubrica_paths"].remove(path)
-                                            try:
-                                                os.remove(path)
-                                            except Exception:
-                                                pass
-                                            removed_day_rubric = True
+                                            remove_rubric_image(path, day_data["rubrica_paths"])
                                 else:
                                     st.write(f"Ruta no encontrada: {path}")
-                            if removed_day_rubric:
-                                st.experimental_rerun()
 
 # --- AI Prompt Generation ---
 st.markdown("---")
@@ -1686,3 +1844,6 @@ if st.button("📥 Generar y Descargar"):
         st.success("Archivos listos para descargar.")
     except Exception as e:
         st.error(f"Error al generar los archivos: {e}")
+
+# Automatically save current session data to SQLite database at the end of execution
+autosave_current_data()
