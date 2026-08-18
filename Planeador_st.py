@@ -1830,7 +1830,7 @@ if st.button("📥 Generar y Descargar"):
         periodo = f"{date.fromisoformat(d['planeacion']['fecha_inicio']).strftime('%d %b')} - {date.fromisoformat(d['planeacion']['fecha_fin']).strftime('%d %b %Y')}"
         grado = f"{d['curso'].get('grado','')}-{' '.join(d['curso'].get('grupos',[]))}"
         docente_str = f"{d['docente'].get('titulo','')} {d['docente'].get('nombre','') }"
-        base_name = f"Planeacion-{periodo}-{d['curso'].get('materia','')}-{grado}-{docente_str}"
+        base_name = f"{d['curso'].get('materia','')}-{grado}-{periodo}-{docente_str}"
         base_name = safe_filename(base_name)
 
         if download_choice in ("PDF", "PDF + WORD"):
