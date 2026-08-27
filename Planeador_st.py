@@ -433,6 +433,7 @@ def map_subject_and_grade(materia, curso_grado):
         "Ingles": "Ingl\u00e9s",
         "Informatica": "Tecnolog\u00eda",
         "Historia": "Historia",
+        "Geografía": "Geografía",
         "Educación Fisica": "Educaci\u00f3n F\u00edsica",
         "Biología": "Biolog\u00eda",
         "Fisica": "F\u00edsica",
