@@ -433,7 +433,7 @@ def map_subject_and_grade(materia, curso_grado):
         "Ingles": "Ingl\u00e9s",
         "Informatica": "Tecnolog\u00eda",
         "Historia": "Historia",
-        "Geografía": "Geografía",
+        "Geografia": "Geografia",
         "Educación Fisica": "Educaci\u00f3n F\u00edsica",
         "Biología": "Biolog\u00eda",
         "Fisica": "F\u00edsica",
@@ -763,7 +763,7 @@ def autosave_current_data():
         pass
 
 # --- Lists ---
-LISTA_MATERIAS = ["Matematicas", "Matematicas I", "Matematicas II", "Matematicas III", "Español", "Español I", "Español II", "Español III", "Educación Civica y Etica", "Educación Civica y Etica I", "Educación Civica y Etica II", "Educación Civica y Etica III", "Ingles", "Ingles I", "Ingles II", "Ingles III", "Informatica", "Informatica I", "Informatica II", "Informatica III", "Historia", "Historia I", "Historia II", "Historia III", "Educación Fisica", "Artes", "Ciencias", "Biología", "Fisica", "Quimica"]
+LISTA_MATERIAS = ["Matematicas", "Matematicas I", "Matematicas II", "Matematicas III", "Geografía", "Español", "Español I", "Español II", "Español III", "Educación Civica y Etica", "Educación Civica y Etica I", "Educación Civica y Etica II", "Educación Civica y Etica III", "Ingles", "Ingles I", "Ingles II", "Ingles III", "Informatica", "Informatica I", "Informatica II", "Informatica III", "Historia", "Historia I", "Historia II", "Historia III", "Educación Fisica", "Artes", "Ciencias", "Biología", "Fisica", "Quimica"]
 LISTA_METODOLOGIA = ["Seleccione metodología", "Aprendizaje Basado en Proyectos (ABPj)", "Aprendizaje Basado en Problemas (ABP)", "STEAM", "Clase invertida (Flipped Classroom)", "Aprendizaje Servicio (ApS)", "Gamificación", "Aprendizaje autodirigido", "Aprendizaje situado", "Aprendizaje entre pares"]
 LISTA_EJES = ["Seleccione eje", "Pensamiento Crítico", "Interculturalidad Crítica", "Igualdad de Género", "Vida Saludable", "Apropiación de las Culturas a través de la Lectura y la Escritura", "Artes y Experiencias Estéticas", "Inclusión"]
 LISTA_CAMPOS = ["Lenguajes", "Saberes y Pensamiento Científico", "Ética, Naturaleza y Sociedades", "De lo Humano y lo Comunitario"]
